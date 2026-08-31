@@ -187,6 +187,18 @@ Vagrant.configure("2") do |config|
   config.vm.hostname = dev_hostname
   config.vm.synced_folder ".", "/vagrant", disabled: true
 
+  # Dev-Fast-Track: Repo einseitig (host→VM) per rsync auf die VM synchronisieren,
+  # damit `scripts/dev.sh` ohne Host-Docker-CLI und ohne Commits gegen die VM bauen
+  # kann. Bewusst zusätzlich zum deaktivierten /vagrant-Mount (Gen-B-Muster bleibt
+  # für den Root-Bootstrap unberührt). `vagrant rsync-auto` schreibt Änderungen
+  # automatisch fortlaufend.
+  # Wichtig: Vagrant rsynct standardmäßig mit --delete; ausgeschlossene Pfade
+  # bleiben auf der VM vom Löschen verschont. .env ist deshalb ebenfalls
+  # ausgeschlossen (Erzeugung nur auf der VM über `scripts/dev.sh init`), damit
+  # der Secret-Transfer des E2E-Tracks nicht bei jedem rsync weggeräumt wird.
+  config.vm.synced_folder ".", "/srv/mirotalk-bro-rtmp", type: "rsync",
+    rsync__exclude: [".git/", "node_modules/", ".vagrant/", "certs/", "config/keys.json", ".env"]
+
   config.ssh.insert_key = true
   config.ssh.forward_agent = false
 

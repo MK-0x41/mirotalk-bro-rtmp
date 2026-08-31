@@ -1,0 +1,28 @@
+# ============================================================================
+# Dev-only Hot-Reload-Override: Bind-Mounts aus dem rsync-synced Repo
+# (/srv/mirotalk-bro-rtmp) + node --watch. Zusammen mit docker-compose.yml und
+# docker-compose.dev-override.yml verwenden (siehe scripts/dev.sh). NIEMALS in
+# Produktion. Dateiänderungen: `vagrant rsync` (oder `vagrant rsync-auto`).
+#
+# Verifiziert gegen die Images:
+#   * bro: WORKDIR /src (Dockerfile), Upstream-Start `npm start` entspricht
+#     `node app/server.js` (package.json) — hier direkt mit node --watch.
+#   * rtmp-adapter: WORKDIR /app (rtmp-adapter/Dockerfile), CMD
+#     `node src/index.js` — analog mit node --watch.
+#   * Bind-Mounts sind read-only; node --watch benötigt keine Schreibrechte
+#     auf den beobachteten Verzeichnissen. Gemountet wird nur app/ bzw.
+#     src/ — node_modules und package.json bleiben aus dem Image.
+#   * Einschränkung: ./public überlagert das im Image frisch gebaute Bundle
+#     public/js/mediasoup-client.js durch die Repo-Version (Details:
+#     docs/RTMP-INGEST.md, Abschnitt Fast-Track).
+# ============================================================================
+services:
+    bro:
+        volumes:
+            - ./app:/src/app:ro
+            - ./public:/src/public:ro
+        command: ['node', '--watch', 'app/server.js']
+    rtmp-adapter:
+        volumes:
+            - ./rtmp-adapter/src:/app/src:ro
+        command: ['node', '--watch', 'src/index.js']
