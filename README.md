@@ -27,6 +27,26 @@ WebRTC live broadcasting for real-time video, audio, and screen streaming to con
 
 <br />
 
+<!-- fork-notice-start -->
+> **Fork: MiroTalk BRO — RTMP-Spezialinstanz**
+>
+> Dieser Fork erweitert MiroTalk BRO (Basis: v1.3.77, volle Upstream-History
+> via Remote `upstream`) um RTMP-Ingest: OBS/Encoder → RTMPS (MediaMTX) →
+> FFmpeg → mediasoup PlainTransport → normale BRO-Viewer.
+>
+> Architektur und technische Entscheidungen: [SPEC.md](SPEC.md). Der
+> Betriebsablauf steht im [RTMP-Runbook](docs/RTMP-INGEST.md). Lizenz:
+> AGPL-3.0 (unverändert, siehe unten); Fork-Änderungen sind ebenfalls AGPL.
+>
+> **Schnellstart Dev:**
+> `cp inventory/dev.yml.example inventory/dev.yml && vagrant up && ansible-playbook -i inventory/dev.yml playbooks/dev_deploy.yml`
+>
+> Produktions-Deployment erfolgt über einen separaten Installer (privat, nicht
+> Teil dieses Repos). Upstream-Dateien sind bis auf die dokumentierten
+> Patch-Punkte unverändert (`app/mediasoup-handler.js`, `app/server.js`,
+> `.env.template`, `.gitignore`, `package.json`).
+<!-- fork-notice-end -->
+
 <p align="center"><strong>MiroTalk BRO</strong> is a <strong>self-hosted, open-source</strong> platform for <strong>real-time live video, audio, and screen broadcasting</strong> to all connected viewers using <strong>WebRTC</strong>. Handles unlimited rooms with no time limits, each with one broadcaster and many viewers.</p>
 
 <p align="center">
