@@ -29,7 +29,13 @@
 
 ### Fixed
 
-- Keine Einträge.
+- E2E-Befund: Crash-Loop des rtmp-Adapters behoben (falscher Require-Pfad
+  `./reconciler` → `./reconcile`); ein neuer statischer Require-Graph-Test
+  sichert die Modulauflösung ab.
+- E2E-Befund: Startup-Logging von BRO maskiert Secrets — `apiKeySecret` sowie
+  (bei aktivem OIDC) `OIDC.config.clientSecret` und `OIDC.config.secret`
+  (SESSION_SECRET) werden nur noch als
+  `set`/`unset` geloggt (zuvor Klartext in `docker logs`).
 
 ### Security
 

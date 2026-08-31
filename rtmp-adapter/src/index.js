@@ -11,7 +11,7 @@ const { createLogger } = require('./log');
 const { KeyStore } = require('./keys');
 const { RateLimiter, createAuthHandler, normalizeIp } = require('./auth');
 const { createHttpServer } = require('./server');
-const { Reconciler } = require('./reconciler');
+const { Reconciler } = require('./reconcile');
 
 const LOCAL_IP_CACHE_TTL_MS = 5000; // container recreates change the IP set
 

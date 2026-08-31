@@ -122,6 +122,11 @@ if (turnServerEnabled && turnServerUrl && turnServerUsername && turnServerCreden
     iceServers.push({ urls: turnServerUrl, username: turnServerUsername, credential: turnServerCredential });
 }
 
+// Sicherheits-Fix im Fork: TURN-Credentials niemals loggen (nur `urls` weiterreichen).
+const iceServersLogSafe = iceServers.map((server) =>
+    server.username || server.credential ? { urls: server.urls } : server
+);
+
 // Ngrok
 const ngrok = require('@ngrok/ngrok');
 const { env } = require('process');
@@ -212,6 +217,18 @@ const OIDC = {
         },
     },
 };
+
+// Sicherheits-Fix im Fork: Secret niemals loggen (nur "set"/"unset"-Indikator).
+const oidcLogSafe = OIDC.enabled
+    ? {
+          ...OIDC,
+          config: {
+              ...OIDC.config,
+              clientSecret: OIDC.config.clientSecret ? 'set' : 'unset',
+              secret: OIDC.config.secret ? 'set' : 'unset',
+          },
+      }
+    : false;
 
 const OIDCAuth = function (req, res, next) {
     if (OIDC.enabled) {
@@ -405,7 +422,7 @@ app.post(`${apiBasePath}/join`, (req, res) => {
     const api = new ServerApi(host, authorization, apiKeySecret);
     if (!api.isAuthorized()) {
         log.debug('MiroTalk get join - Unauthorized', {
-            header: req.headers,
+            header: sanitizeHeaders(req.headers),
             body: req.body,
         });
         return res.status(403).json({ error: 'Unauthorized!' });
@@ -413,7 +430,7 @@ app.post(`${apiBasePath}/join`, (req, res) => {
     const joinURL = api.getJoinURL(req.body);
     res.json({ join: joinURL });
     log.debug('MiroTalk get join - Authorized', {
-        header: req.headers,
+        header: sanitizeHeaders(req.headers),
         body: req.body,
         join: joinURL,
     });
@@ -631,8 +648,8 @@ async function ngrokStart() {
         const tunnelHttps = listener.url();
         log.info('Server is running', {
             trustProxy: trustProxy,
-            oidc: OIDC.enabled ? OIDC : false,
-            iceServers: iceServers,
+            oidc: oidcLogSafe,
+            iceServers: iceServersLogSafe,
             cors: corsOptions,
             embed: {
                 allowedOrigins: embedAllowedOrigins.length ? embedAllowedOrigins : 'any',
@@ -643,7 +660,7 @@ async function ngrokStart() {
             ngrokViewer: `${tunnelHttps}/${viewer}`,
             ngrokViewerHome: `${tunnelHttps}/${viewerHome}`,
             apiDocs: apiDocs,
-            apiKeySecret: apiKeySecret,
+            apiKeySecret: apiKeySecret ? 'set' : 'unset', // Sicherheits-Fix im Fork: Secret niemals loggen
             environment: process.env.NODE_ENV || 'development',
             nodeVersion: process.versions.node,
             app_version: packageJson.version,
@@ -671,8 +688,8 @@ async function startServer() {
             log.info('Server is running', {
                 broadcastingMode: broadcastingMode,
                 trustProxy: trustProxy,
-                oidc: OIDC.enabled ? OIDC : false,
-                iceServers: iceServers,
+                oidc: oidcLogSafe,
+                iceServers: iceServersLogSafe,
                 cors: corsOptions,
                 embed: {
                     allowedOrigins: embedAllowedOrigins.length ? embedAllowedOrigins : 'any',
@@ -683,7 +700,7 @@ async function startServer() {
                 viewer: `${host}/${viewer}`,
                 viewerHome: `${host}/${viewerHome}`,
                 apiDocs: apiDocs,
-                apiKeySecret: apiKeySecret,
+                apiKeySecret: apiKeySecret ? 'set' : 'unset', // Sicherheits-Fix im Fork: Secret niemals loggen
                 environment: process.env.NODE_ENV || 'development',
                 nodeVersion: process.versions.node,
                 app_version: packageJson.version,
