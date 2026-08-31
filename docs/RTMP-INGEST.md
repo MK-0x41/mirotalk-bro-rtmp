@@ -82,20 +82,93 @@ committeten, sauberen Arbeitsstand, weil es `git archive HEAD` überträgt.
 
 Nach erfolgreichem Deployment:
 
-- Viewer: <http://192.168.56.5:3016/viewer?id=devstudio&name=viewer>
-- Dev-Stream-Key in der VM:
-  `/opt/mirotalkbro-rtmp/.secrets/dev-stream-key.txt`
-- Interner FFmpeg-Testpublish (in der VM oder von einem erreichbaren Dev-Host):
+- Das Playbook hat über die Rooms-API (`POST /api/v1/rooms`) einen RTMP-Raum
+  namens `devstudio` angelegt — oder, wenn er aus einem früheren Lauf noch
+  existierte, dessen Stream-Key rotiert — und die Raum-Id (UUID) sowie den
+  Pfad der Token-Datei ausgegeben.
+- Viewer: `http://192.168.56.5:3016/viewer?id=<roomId>&name=viewer` — die
+  konkrete Raum-Id steht in der Playbook-Ausgabe.
+- Dev-Stream-Key (Klartext-Token) in der VM:
+  `/opt/mirotalkbro-rtmp/.secrets/dev-stream-key.txt` (0600/root, ohne
+  Newline; wird bei jedem Playbook-Lauf neu angelegt bzw. rotiert)
+- Interner FFmpeg-Testpublish (in der VM oder von einem erreichbaren Dev-Host;
+  `<roomId>` durch die ausgegebene UUID ersetzen):
 
   ```bash
-  ffmpeg -re -f lavfi -i testsrc=size=1280x720:rate=30 -f lavfi -i sine=frequency=440 -c:v libx264 -preset veryfast -tune zerolatency -pix_fmt yuv420p -c:a aac -ar 48000 -f flv "rtmp://192.168.56.5:19350/live/devstudio?token=$(cat /opt/mirotalkbro-rtmp/.secrets/dev-stream-key.txt)"
+  ffmpeg -re -f lavfi -i testsrc=size=1280x720:rate=30 -f lavfi -i sine=frequency=440 -c:v libx264 -preset veryfast -tune zerolatency -pix_fmt yuv420p -c:a aac -ar 48000 -f flv "rtmp://192.168.56.5:19350/live/<roomId>?token=$(cat /opt/mirotalkbro-rtmp/.secrets/dev-stream-key.txt)"
   ```
 
 Für einen RTMPS-Test kann OBS den Server
-`rtmps://192.168.56.5:1935/live` verwenden. Das Dev-Zertifikat ist selbst-
-signiert; OBS oder der Testclient muss es explizit akzeptieren. Für auto-
-matisierte Prüfungen ist der interne Plain-RTMP-Test oben vorzuziehen. In
-Produktion ausschließlich RTMPS verwenden.
+`rtmps://192.168.56.5:1935/live` verwenden; als Stream-Key
+`<roomId>?token=<TOKEN>` mit dem Token aus der Key-Datei. Das Dev-Zertifikat
+ist selbstsigniert; OBS oder der Testclient muss es explizit akzeptieren.
+Für automatisierte Prüfungen ist der interne Plain-RTMP-Test oben vorzuziehen.
+In Produktion ausschließlich RTMPS verwenden.
+
+Die Raum-Registry des BRO liegt im Speicher: Nach jedem BRO-Neustart ist der
+`devstudio`-Raum gelöscht — ein Publish läuft dann auf 401/404 (der Adapter
+wiederholt mit Backoff und stürzt nicht ab). Zum Wiederherstellen das
+Playbook erneut ausführen oder über das RTMP-Raum-Panel der BRO-Weboberfläche
+einen neuen Raum anlegen bzw. den Key rotieren. `config/keys.json` stellt das
+Playbook bewusst mit leerem `streams`-Objekt bereit: Der statische Key-Fallback
+ist damit deaktiviert (fail-closed), die Authentifizierung läuft vollständig
+über die Rooms-Registry (`RTMP_REQUIRE_ROOM=true` und `RTMP_DYNAMIC_AUTH=true`,
+je Produktions-Default — die Dev-Instanz setzt beide bewusst nicht).
+
+### Fast-Track (Hot Reload)
+
+Für die schnelle Iteration am Arbeitsstand gibt es zusätzlich zum E2E-Track
+einen Dev-Fast-Track ohne Commits und ohne Docker-CLI auf dem Host: Das
+Repository wird per rsync einseitig auf die VM gespiegelt
+(`/srv/mirotalk-bro-rtmp`, rsync-synced folder im Vagrantfile) und dort mit
+dem Hot-Reload-Override `docker-compose.dev-watch.yml` gestartet —
+`node --watch` plus read-only Bind-Mounts auf `app/`, `public/` und
+`rtmp-adapter/src/` starten die Node-Prozesse bei Änderungen neu.
+
+Wann welcher Track:
+
+- **Fast-Track** (`scripts/dev.sh`): schnelle Feedback-Schleife am
+  uncommitteten Arbeitsstand; kein Commit und kein Ansible-Lauf nötig.
+- **E2E-Track** (`playbooks/dev_deploy.yml`): bleibt die Source of Truth —
+  er überträgt den committeten, sauberen Stand per `git archive HEAD`
+  vollständig in ein eigenes Projektverzeichnis und muss vor jeder Übergabe
+  grün sein.
+
+Ablauf des Fast-Tracks:
+
+```bash
+./scripts/dev.sh init        # einmalig: .env, config/keys.json, certs/
+                             # aus dem E2E-Track (/opt/mirotalkbro-rtmp)
+                             # auf die VM übernehmen; überschreibt nichts
+./scripts/dev.sh up          # rsync + Stack mit Hot-Reload starten
+vagrant rsync-auto           # optional, zweites Terminal: Änderungen
+                             # fortlaufend host→VM synchronisieren
+./scripts/dev.sh logs -f bro # Logs verfolgen
+```
+
+Secrets (`.env`, `config/keys.json`, `certs/`) leben nur auf der VM und sind
+von rsync ausgenommen; `init` überschreibt nichts und gibt nie Secret-Werte
+aus. Beide Tracks nutzen dieselben Ports — `scripts/dev.sh up` prüft das und
+bricht ab, solange der E2E-Stack läuft (und umgekehrt; E2E zuerst per
+`playbooks/dev_teardown.yml` herunterfahren). Docker in der VM installiert
+einmalig der E2E-Track.
+
+Einschränkungen des Fast-Tracks:
+
+- Kein Commit nötig, aber nur der E2E-Track validiert den committeten
+  Stand; der Fast-Track ersetzt keine Übergabeprüfung.
+- Hot Reload startet die Node-Prozesse (`bro`, `rtmp-adapter`) neu —
+  laufende Verbindungen und Streams werden dabei kurz unterbrochen.
+- Änderungen an Abhängigkeiten sind nicht hot: `package.json`,
+  `package-lock.json`, Dockerfiles und mediasoup-Neubauten erfordern
+  `./scripts/dev.sh rebuild` und anschließend `up`.
+- Der Bind-Mount auf `public/` überlagert das im Image frisch gebaute
+  `public/js/mediasoup-client.js`-Bundle durch die Repository-Version; für
+  verlässliche Aussagen über das gebundene Bundle gilt der E2E-Track.
+- `vagrant rsync-auto` ignoriert Änderungen an ausgeschlossenen Pfaden
+  (Vagrant bildet aus den rsync-Excludes breite Ignore-Muster) — Änderungen
+  an `.env.example`/`.env.template` erfordern dann ein manuelles
+  `./scripts/dev.sh sync`.
 
 ### Teardown
 
@@ -125,13 +198,59 @@ Die folgenden Kriterien gelten für den VM-only-E2E-Test:
       bereinigt.
 - [ ] Nach einem BRO-Neustart führt der Adapter ein Reattach mit frischen
       Ports und SSRCs aus; es bleiben keine verwaisten Ports zurück.
+- [ ] Nach einem BRO-Neustart ist die (in-memory) Raum-Registry leer: Der
+      Adapter erhält für neue Publishes 404 bzw. die Authentifizierung 401,
+      wiederholt mit Backoff und stürzt nicht ab; nach Neuanlage des Raums
+      (Playbook, Rooms-API oder UI-Panel) nimmt der Ingest Streams wieder an.
 - [ ] Stream-Keys, Bearer-Secrets, Query-Strings und andere Secrets erscheinen
       in keinem Log.
 
 ## 4. Stream-Keys verwalten
 
-Stream-Keys werden nicht im Klartext gespeichert. Erzeuge einen hochentropischen
-Token und berechne dessen ungesalzenen SHA-256-Hash:
+Stream-Keys sind raumbezogen: Jeder registrierte RTMP-Raum hat genau einen
+Key, der ausschließlich als ungesalzener SHA-256-Hash in der In-Memory-
+Raum-Registry des BRO liegt. Der Klartext-Key wird nur bei Anlage und
+Rotation zurückgegeben — er ist danach nicht rekonstruierbar und muss sicher
+gespeichert werden. Eine Rotation widerruft den alten Key sofort.
+
+Verwaltung über die admin-geschützte Rooms-API (`/api/v1/rooms`, Bearer
+`ADMIN_TOKEN`) oder das RTMP-Raum-Panel der BRO-Weboberfläche:
+
+```bash
+# Raum anlegen (Antwort enthält einmalig rtmp.streamKey im Format
+# "<roomId>?token=<key>" sowie viewerUrl und ingestServer)
+curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"sourceType":"rtmp","name":"studio1"}' \
+  http://127.0.0.1:3016/api/v1/rooms
+
+# Stream-Key rotieren (alter Key wird sofort ungültig)
+curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
+  http://127.0.0.1:3016/api/v1/rooms/<roomId>/rotate-key
+```
+
+Das Dev-Deployment automatisiert genau diesen Ablauf: `dev_deploy.yml` legt
+den Raum `devstudio` an bzw. rotiert dessen Key und hinterlegt das Token
+unter `.secrets/dev-stream-key.txt`.
+
+Da die Registry nur im Speicher liegt, überlebt sie keinen BRO-Neustart:
+Alle Räume und Keys sind danach weg und müssen neu angelegt werden (Dev:
+Playbook erneut ausführen).
+
+### Statischer Notfall-Fallback (keys.json)
+
+`config/keys.json` ist ein statischer Fallback für den Fall, dass die
+dynamische Authentifizierung gegen BRO mit einem HTTP-/Netzwerkfehler
+scheitert. Im Regelbetrieb ist er deaktiviert: `RTMP_REQUIRE_ROOM=true`
+(Default) verlangt einen registrierten RTMP-Raum, und das Dev-Deployment
+rendert die Datei mit leerem `streams`-Objekt — ein leerer Key-Store
+widerruft alle statischen Streams (fail-closed).
+
+Ein echter statischer Betrieb („Notfallmodus“, ohne Raum-Registry) erfordert
+explizit **beide** Opt-outs in der `.env`: `RTMP_REQUIRE_ROOM=false` **und**
+`RTMP_DYNAMIC_AUTH=false` — nur dann prüft der Adapter ausschließlich gegen
+`config/keys.json`. Dafür einen hochentropischen Token erzeugen und deren
+ungesalzenen SHA-256-Hash berechnen:
 
 ```bash
 TOKEN="$(openssl rand -hex 32)"
@@ -167,12 +286,14 @@ Tokens müssen hochentropisch sein, mindestens nach dem Muster
 Für Produktion:
 
 - Server: `rtmps://<host>:1935/live`
-- Stream-Key: `<broadcastId>?token=<TOKEN>`
+- Stream-Key: `<roomId>?token=<TOKEN>`
 
 In OBS wird die URL als Server und der zusammengesetzte Wert als Stream-Key
 eingetragen; bei Encodern gelten dieselben Path- und Query-Bestandteile. In
-Produktion ist ausschließlich RTMPS zulässig. Der Stream-Key muss zu genau dem
-`broadcastId`-Path passen.
+Produktion ist ausschließlich RTMPS zulässig. Der Stream-Key muss zu genau
+dem registrierten RTMP-Raum passen: `<roomId>` ist die UUID aus der Rooms-API
+bzw. dem UI-Panel, und `<TOKEN>` der dort einmalig ausgegebene Klartext-Key
+(nach einer Rotation gilt nur der neue).
 
 Pro Raum ist genau ein aktiver Publisher vorgesehen. Ein RTMP-Ingest ist die
 exklusive Primärquelle: Ein Raum mit Browser-Broadcaster oder anderem
@@ -227,9 +348,14 @@ Zugriff aus dem Adapter-Container ist dessen interne BRO-Adresse statt
 
 ### Häufige Ursachen
 
-- **401 trotz gültigem Token:** Path muss `live/<broadcastId>` entsprechen;
-  außerdem `config/keys.json`, `keyHash` und den geladenen Key prüfen. Ein
-  fehlender, unlesbarer oder gelöschter Key-Store widerruft alle Streams.
+- **401 trotz gültigem Token:** Path muss `live/<roomId>` der registrierten
+  Raum-Id entsprechen, und der Token muss zum zuletzt ausgestellten Key
+  passen (Rotation und Neuanlage widerrufen alte Keys). Die Raum-Registry
+  liegt im Speicher — nach einem BRO-Neustart muss der Raum erst neu
+  angelegt werden. Im statischen Notfallmodus zusätzlich `config/keys.json`,
+  `keyHash` und den geladenen Key prüfen: Ein fehlender, unlesbarer oder
+  gelöschter Key-Store (auch ein leeres `streams`-Objekt) widerruft alle
+  Streams.
 - **Ingest startet nicht:** Überlappung zwischen `41000–41099` und dem
   mediasoup-RTC-Portbereich führt absichtlich zu einer fail-closed-Ablehnung.
 - **Video oder Audio fehlt:** Prüfen, ob der Encoder beide Spuren liefert und
@@ -237,6 +363,9 @@ Zugriff aus dem Adapter-Container ist dessen interne BRO-Adresse statt
 - **Producer bleibt aus oder wird geschlossen:** RTP- und RTCP-Port müssen
   erreichbar sein; fehlendes RTCP, insbesondere bei deaktiviertem RTCP-Mux,
   verhindert einen stabilen PlainTransport.
-- **Stream verschwindet nach BRO-Neustart:** Adapter-Reconciler und BRO-Status-
-  endpoint prüfen; ein positiver Statusfehler wird nicht als Ausfall gewertet,
-  ein bestätigtes Fehlen löst Reattach mit neuen Ports und SSRCs aus.
+- **Stream verschwindet nach BRO-Neustart:** Zuerst prüfen, ob der RTMP-Raum
+  noch registriert ist — die Registry ist in-memory und wird durch den
+  Neustart geleert (Neuanlage per Playbook, Rooms-API oder UI-Panel). Danach
+  Adapter-Reconciler und BRO-Status-Endpoint prüfen; ein positiver Status-
+  fehler wird nicht als Ausfall gewertet, ein bestätigtes Fehlen löst
+  Reattach mit neuen Ports und SSRCs aus.

@@ -15,8 +15,18 @@
   privaten Vagrant-Netz angelegt.
 - Vagrant-Dev-VM (`debian/trixie64`, libvirt, `192.168.56.5`) sowie die
   `dev_deploy`- und `dev_teardown`-Playbooks.
-- Tests: 33 BRO-seitige Tests (`test/`, `npm run test:fork`) und 95
-  Adapter-Tests.
+- Quellen-Auswahl im WebUI für Kamera, Bildschirm und RTMP; Bildschirm startet
+  verzögert nach einer Browser-User-Geste, Kamera bleibt der Default.
+- Per-Room-Stream-Keys über die administrativ geschützte Rooms-API (Create, Rotation,
+  Delete); Klartext nur einmalig, Hash-at-Rest und Rate-Limiting.
+- Dynamische Autorisierung des Adapters gegen die BRO-Registry; der statische
+  `keys.json`-Fallback bleibt ausschließlich als Notfallmodus.
+- `RTMP_REQUIRE_ROOM` bindet den Ingest an registrierte RTMP-Räume.
+- Dev-Fast-Track mit rsync und `node --watch`, ohne Docker-CLI auf dem Host.
+- E2E-Deploy mit echtem Per-Room-Key-Flow.
+- `sanitizeBody`-Redaktion in den globalen Request- und Fehler-Loggern.
+- RTMP-Karte nur im SFU-Modus.
+- Tests: 87 Root-Tests (`test/`, `npm run test:fork`) und 106 Adapter-Tests.
 - `SPEC.md` und das RTMP-Runbook.
 
 ### Changed
@@ -49,6 +59,10 @@
 - IPv4-mapped-Adressen werden normalisiert, Key-Prüfungen timing-uniform
   durchgeführt und Auth-Header redigiert; ein Strukturtest deckt die
   Redigierung ab.
+- Die Rooms-API verweigert fehlende oder dokumentierte Default-
+  `ADMIN_TOKEN`-Konfiguration fail-closed und begrenzt Fehlversuche pro IP.
+- Stream-Keys werden in der Raum-Registry nur als SHA-256-Hashes gehalten;
+  Klartext erscheint ausschließlich in Create- und Rotate-Antworten.
 
 Basis ist Upstream `mirotalkbro` v1.3.77 (Vendor-Import der vollen
 Git-History, Remote `upstream`).

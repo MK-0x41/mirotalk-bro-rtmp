@@ -35,6 +35,17 @@ BROADCASTING=sfu
 ADMIN_TOKEN={{ mirotalkbro_rtp_dev_admin_token }}
 API_KEY_SECRET={{ mirotalkbro_rtp_dev_api_key_secret }}
 
+# --- RTMP-Raumverwaltung (Fork) ----------------------------------------------
+# Öffentliche Ingest-URL für Encoder (Antwortfeld rtmp.ingestServer der
+# Rooms-API): Der Dev-Host erreicht die VM über die private Vagrant-Netz-IP
+# — dieselbe IP wie die Dev-Bindings in dev_deploy.yml.
+# RTMP_REQUIRE_ROOM und RTMP_DYNAMIC_AUTH bleiben bewusst UNSET: Die
+# Produktions-Defaults (je true) gelten — Ingest nur in registrierte RTMP-
+# Räume, Keys kommen per-Raum dynamisch aus der Rooms-Registry (Adapter
+# fragt BRO /authorize). Der statische keys.json-Fallback ist über ein
+# leeres streams-Objekt deaktiviert.
+RTMP_INGEST_URL=rtmps://{{ mirotalkbro_rtp_dev_bind_ip }}:1935/live
+
 # --- mediasoup (SFU) ----------------------------------------------------------
 # Anzahl Worker; leer = Anzahl CPU-Kerne.
 MEDIASOUP_NUM_WORKERS=

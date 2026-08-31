@@ -85,6 +85,14 @@ unverändert.
 | BRO-Patch | `PlainTransport` und Producer für externen Ingest |
 | BRO-Viewer | Unverändert vorhandene Anzeige und Wiedergabe |
 
+In v2 bietet die Startseite einen Quellen-Chooser. Kamera bleibt die
+unveränderte Standardauswahl. Bildschirmfreigabe verwendet die bestehende
+Upstream-Medienpipeline; der Start wird bis zu einer ausdrücklichen
+Browser-User-Geste verzögert, damit `getDisplayMedia`-Richtlinien erfüllt
+werden. RTMP wird als eigene Quelle angeboten. Die RTMP-Karte wird nur bei
+`broadcastingMode=sfu` angezeigt bzw. aktiviert. `source=screen` erzeugt
+keinen Fork der Medienpipeline.
+
 ## 4. BRO-Patch (externe Ingest-API)
 
 ### 4.1 Betroffene Dateien und Funktionen
@@ -191,6 +199,33 @@ und benötigt Node.js 20 oder neuer.
   - Playback-Aktionen und nicht unterstützte Aktionen werden abgewiesen.
 - `GET /healthz` dient dem Health Check.
 
+Für v2 delegiert `/auth/publish` die Publish-Prüfung standardmäßig dynamisch
+an `POST /api/v1/external-ingest/authorize`. Die Anfrage verwendet
+`Authorization: Bearer EXTERNAL_INGEST_SECRET` und den Body
+`{ "broadcastId": "…", "token": "…" }`. Die BRO-Registry führt die
+Validierung timing-uniform und mit Dummy-Hash auch für unbekannte Räume aus;
+erst danach wird die finale Allow-/Deny-Entscheidung gebildet. Eine
+ausdrückliche Ablehnung ist final. Nur HTTP-, Netzwerk- oder
+Antwortformatfehler lösen den statischen `keys.json`-Fallback aus; im
+Development ist `keys.json` leer und damit wirkungslos.
+
+Die Reconciliation behandelt einen nach einem BRO-Neustart noch laufenden
+RTMP-Publisher robust: Wenn der Raum fehlt, antwortet der BRO-Start mit 404.
+Der Adapter wiederholt den Start mit Backoff und stürzt nicht in einen
+Crash-Loop. Die Wiederherstellung erfolgt durch erneute Raum-Anlage über
+Playbook, UI oder API.
+
+Für die v2-Konfiguration gelten folgende Umgebungsvariablen:
+
+- `RTMP_MAX_ROOMS=50` begrenzt die Zahl registrierter RTMP-Räume.
+- `RTMP_INGEST_URL` ist standardmäßig leer und wird dann zu
+  `rtmps://<hostname>:1935/live` abgeleitet.
+- `RTMP_REQUIRE_ROOM=true` bindet den Ingest an einen existierenden RTMP-Raum.
+- `RTMP_DYNAMIC_AUTH=true` aktiviert die dynamische Adapter-Autorisierung.
+
+Der statische Notfallmodus ist nur zulässig, wenn
+`RTMP_REQUIRE_ROOM=false` **und** `RTMP_DYNAMIC_AUTH=false` gesetzt sind.
+
 ### 5.2 Reconciliation und FFmpeg-Prozesse
 
 Eine Reconciliation-Schleife fragt ungefähr alle zwei Sekunden
@@ -260,9 +295,36 @@ Streams. Der Key-Store ist prototype-sicher. Die Prüfung ist timing-uniform und
 führt auch bei unbekanntem `broadcastId` einen Dummy-Hash-Vergleich aus.
 IPv4-mapped-IPv6-Adressen werden normalisiert; der Resolver für lokale IPs
 verwendet einen 5-Sekunden-Cache. Die zulässige SSRC-Spanne ist `1` bis
-`0x7fffffff` und damit an BRO und FFmpeg angeglichen. Bei
-`uncaughtException` erfolgt ein Graceful-Cleanup und anschließend der Exit mit
-Status 1.
+  `0x7fffffff` und damit an BRO und FFmpeg angeglichen. Bei
+  `uncaughtException` erfolgt ein Graceful-Cleanup und anschließend der Exit mit
+  Status 1.
+
+### 5.5 v2: Raum-Registry und dynamische Autorisierung
+
+Die Raumverwaltung liegt in `app/rooms.js` in einer absichtlich flüchtigen
+In-Memory-Registry. Das entspricht dem Upstream-Raumkonzept ohne Persistenz:
+Ein BRO-Restart leert die Registry, Räume müssen danach neu angelegt werden.
+Das Storage-Interface ist bereits so geschnitten, dass später ein SQLite-
+Backend angeschlossen werden kann.
+
+`createRoom` liefert `{ room, key }`. Für einen RTMP-Raum wird der zufällige
+Klartext-Key genau einmal an den Aufrufer zurückgegeben; in der Registry wird
+ausschließlich sein SHA-256-Hash gespeichert. `getRoom`, Listen- und
+Löschoperationen geben niemals Schlüsselmaterial zurück. Die Admin-API unter
+`/api/v1/rooms` ist mit `Bearer ADMIN_TOKEN` geschützt und bietet
+`POST`/`GET`/`DELETE` sowie `POST /api/v1/rooms/:id/rotate-key`. Ohne gesetztes
+`ADMIN_TOKEN` oder mit dem dokumentierten Default antwortet sie fail-closed
+mit HTTP 503. Pro IP sind zehn fehlgeschlagene Versuche in 60 Sekunden
+zulässig; weitere Versuche erhalten HTTP 429. Der Klartext-Key erscheint nur
+in der Create- bzw. Rotate-Antwort.
+
+`RTMP_REQUIRE_ROOM=true` wird zusätzlich vor der
+`PlainTransport`-Erzeugung durchgesetzt: Ein unbekannter oder nicht als RTMP
+markierter Raum erhält HTTP 404. Die dynamische Autorisierung verwendet
+gleichförmige Hash-Prüfungen und bindet die Entscheidung an den registrierten
+Raum und seinen aktuellen Key. Nach einer Rotation ist der alte Key für neue
+Verbindungen sofort ungültig; eine bereits bestehende Encoder-Session läuft
+bis zu ihrer Trennung weiter.
 
 ## 6. MediaMTX-Konfiguration
 
@@ -325,7 +387,7 @@ Für v1 wird Video zur besseren Vorhersagbarkeit auf H.264 Baseline normiert.
 Eine Optimierung durch Stream-Copy ist ein Follow-up und nur zulässig, wenn die
 Parameter kompatibel sind.
 
-## 9. v1-Nicht-Ziele
+## 9. v1-Nicht-Ziele und v2-Erweiterungen
 
 Folgende Funktionen sind ausdrücklich nicht Bestandteil von v1:
 
@@ -338,6 +400,13 @@ Folgende Funktionen sind ausdrücklich nicht Bestandteil von v1:
 - HLS-Fallback.
 - Eigenes Nginx-RTMP-Modul.
 - Ingest im P2P-Modus; unterstützt wird ausschließlich SFU.
+
+v2 ergänzt die bisherige Ein-Quellen-Regel um die Auswahl auf der Startseite:
+Kamera, Bildschirm und RTMP sind auswählbar, wobei Kamera unverändert der
+Default bleibt. Bildschirm verwendet die vorhandene Browser-Pipeline und
+startet erst nach einer User-Geste. RTMP bleibt eine exklusive Primärquelle
+des Raums und ist nur im SFU-Modus verfügbar. Die RTMP-Karte wird in anderen
+Broadcasting-Modi nicht angeboten.
 
 ## 10. Ports
 
@@ -415,6 +484,22 @@ Optional kann vor `dev_deploy` eine eigene Host-Hardening-Baseline angewendet
 werden; danach ist das Dev-Inventar entsprechend anzupassen (gehärteter
 Benutzer/SSH-Port).
 
+### 11.3 Dev-Fast-Track (Phase 1)
+
+Für schnelle Iterationen gibt es zusätzlich den rsync-basierten
+Dev-Fast-Track. Das Repository wird einseitig in den rsync-synced Folder
+`/srv/mirotalk-bro-rtmp` gespiegelt. `.env`, `config/keys.json`,
+`certs/` und `.git/` werden dabei ausgeschlossen und verbleiben auf der VM.
+`scripts/dev.sh` stellt die VM sicher und bietet `init`, `up`, `build`,
+`rebuild`, `down`, `restart`, `ps`, `logs`, `sync` und `shell`. Für den
+Fast-Track ist keine Docker-CLI auf dem Host erforderlich.
+
+`docker-compose.dev-watch.yml` bindet `app/`, `public/` und
+`rtmp-adapter/src/` read-only ein und startet die Node-Prozesse mit
+`node --watch`. Der Fast-Track beschleunigt die Rückkopplung für den
+Arbeitsstand, ersetzt aber nicht die verbindliche E2E-Prüfung von
+`dev_deploy`.
+
 ## 12. Upstream-Merge-Strategie
 
 Der Vendor-Import bleibt als echte Git-Historie erhalten. Patches werden klein
@@ -471,6 +556,16 @@ Upstream verweisen und die vorgenommenen Änderungen benennen.
 - `.env` ist in Dev wegen des Container-UID-1000-Trade-offs `0644`; in
   Produktion sind `0640` mit root und passender Gruppe oder Docker-Secrets zu
   verwenden.
+- Die Rooms-API ist ohne gültigen, nicht-defaultmäßigen `ADMIN_TOKEN`
+  unbenutzbar (HTTP 503) und rate-limitiert zehn Fehlversuche je IP und
+  60-Sekunden-Fenster (danach HTTP 429).
+- Raum-Keys werden pro Raum ausschließlich als SHA-256-Hash im Speicher
+  gehalten; Klartext wird nur bei Create und Rotation ausgeliefert. Die
+  Registry hat bewusst keine Persistenz und wird bei einem BRO-Restart geleert.
+- `sanitizeBody` redigiert in beiden globalen Request- und Fehler-Loggern
+  Schlüssel, deren Namen `token`, `secret`, `password`, `streamkey`, `key`
+  oder `authorization` enthalten, zu `[REDACTED]`. Damit darf auch der
+  `/authorize`-Token bei aktiviertem DEBUG nicht in Logs erscheinen.
 - Die Ports `19350`, `9997` und `8080` werden niemals auf den Host
   veröffentlicht.
 - Stream-Keys und Tokens werden in Logs redigiert. Insbesondere dürfen weder
@@ -508,7 +603,7 @@ Nicht-Ziel deklariert; die Integration ist als Follow-up vorgesehen:
 
 Diese Installer-Integration ist **nicht** Bestandteil dieses Repositories.
 
-## 16. Abnahmekriterien v1
+## 16. Abnahmekriterien v1 und v2
 
 1. OBS oder FFmpeg kann mit einem gültigen Schlüssel über RTMPS publizieren;
    Viewer im BRO-Web-Viewer sehen und hören Audio/Video innerhalb von etwa
@@ -527,3 +622,25 @@ Diese Installer-Integration ist **nicht** Bestandteil dieses Repositories.
    `app/mediasoup-handler.js`, `app/server.js` (einschließlich einer
    sicherheitsrelevanten Log-Zeile), `.env.template` und `.gitignore`.
 8. Alle in Abschnitt 15 aufgeführten Validierungsbefehle sind erfolgreich.
+
+Für v2 kommen hinzu:
+
+9. Die Startseite zeigt den Quellen-Chooser mit Kamera als unverändertem
+   Default. Bildschirmfreigabe startet erst nach einer Browser-User-Geste
+   über die bestehende Medienpipeline; die RTMP-Karte erscheint nur bei
+   `broadcastingMode=sfu`.
+10. Die Anlage eines RTMP-Raums über die UI zeigt die Connect-URLs und den
+    Klartext-Key genau einmal. Eine spätere Listen- oder Get-Antwort enthält
+    keinen Key.
+11. Ein falscher Room-Key erhält HTTP 401. Eine Rotation macht den alten Key
+    für neue Verbindungen sofort ungültig; eine bereits laufende Encoder-
+    Session darf bis zum Disconnect weiterlaufen. Dieses Verhalten ist im
+    Runbook dokumentiert.
+12. Die Rooms-API liefert nach zehn Fehlversuchen derselben IP innerhalb von
+    60 Sekunden HTTP 429 und erlaubt nach Ablauf des Fensters neue Versuche.
+13. Der v2-E2E-Flow legt bzw. rotiert den RTMP-Dev-Raum `devstudio` über die
+    Rooms-API mit `no_log` an. Der Token wird nach
+    `.secrets/dev-stream-key.txt` geschrieben, `keys.json` bleibt leer. Nach
+    einem BRO-Restart führt die leere Registry zu einem 404 beim Adapter-Start
+    mit Backoff, nicht zu einem Crash-Loop; die erneute Anlage stellt den
+    Ingest wieder her.

@@ -20,6 +20,9 @@
     # Inventar-Variable mirotalkbro_rtmp_dev_domain gewinnt, sonst Default.
     mirotalkbro_rtp_dev_domain: >-
       {{ mirotalkbro_rtmp_dev_domain | default('mirotalkbro-rtmp-dev.test') }}
+    # Name des RTMP-Dev-Raums, den das Playbook über die Rooms-API anlegt
+    # (Quelle rtmp). Die Raum-Id selbst ist ein UUID und wird pro Lauf aus
+    # der API ermittelt; sie erscheint in Viewer-URL und ffmpeg-One-Liner.
     mirotalkbro_rtp_dev_broadcast_id: devstudio
     mirotalkbro_rtp_dev_port: 3016
     # Bindungs-IP der Dev-Override-Compose-Datei (docker-compose.dev-
@@ -201,9 +204,10 @@
         # damit im Git gelöschte Dateien kein Re-Deploy überleben. Reihenfolge
         # (räumen → entpacken → rendern) ist wesentlich: Die Render-Artefakte
         # (.env, certs/tls.*, config/keys.json) werden NACH dem Räumen neu
-        # erzeugt — keys.json und .env bedingungslos per Template, das
-        # Zertifikat über seinen creates-Guard (nach dem Räumen erneut
-        # angelegt; akzeptables Dev-Verhalten). Secrets überleben in .secrets.
+        # erzeugt — .env bedingungslos per Template, keys.json bedingungslos
+        # mit leerem streams-Fallback, das Zertifikat über seinen creates-Guard
+        # (nach dem Räumen erneut angelegt; akzeptables Dev-Verhalten). Secrets
+        # überleben in .secrets.
         - name: Projektverzeichnis räumen (alles außer .secrets)
           ansible.builtin.command:
             argv:
@@ -282,15 +286,18 @@
         mode: "0700"
 
     # --- Dev-Secrets generieren (idempotent: nur wenn absent) ----------------
-    # Der Dev-Stream-Key ist bewusst Klartext: er IST die Credentials, die
-    # ein Publisher zum Publizieren braucht. Alle Dateien 0600/root.
+    # Start-/Verbindungsgeheimnisse (BRO-Ingest-Secret, Admin-Token, API-Key).
+    # Der Dev-Stream-Key ist NICHT mehr darunter: Er ist kein statisches
+    # Secret mehr, sondern kommt pro Lauf per-Raum aus der Rooms-API (Anlage
+    # bzw. Rotation des RTMP-Dev-Raums, siehe unten) und wird dort unter
+    # .secrets abgelegt. Alle Dateien 0600/root.
 
     - name: Dev-Secrets generieren (idempotent, atomar, ohne Newline)
       # argv-Form: bash -c erhält das Skript als EIN Argument — keine
       # Shell-Reinterpretation durch Ansible. Atomar via <datei>.tmp + mv,
       # umask 077 sorgt bereits bei der Erzeugung für 0600. printf %s
       # schreibt KEIN abschließendes Newline, damit Dateiinhalt und
-      # Shell-$(cat …) byte-identisch sind (Hash- und Token-Vergleich).
+      # Shell-$(cat …) byte-identisch sind (Token-Vergleich).
       ansible.builtin.command:
         argv:
           - /bin/bash
@@ -305,32 +312,6 @@
         - "{{ mirotalkbro_rtp_dev_secrets_dir }}/bro-ingest-secret.txt"
         - "{{ mirotalkbro_rtp_dev_secrets_dir }}/admin-token.txt"
         - "{{ mirotalkbro_rtp_dev_secrets_dir }}/api-key-secret.txt"
-        - "{{ mirotalkbro_rtp_dev_secrets_dir }}/dev-stream-key.txt"
-      no_log: true
-
-    - name: SHA-256-Hash des Dev-Stream-Keys erzeugen
-      # Hasht EXAKT die Token-Bytes: printf %s und $(cat …) entfernen
-      # sämtliche Newlines, sodass der Hash dem Token entspricht, das ffmpeg
-      # als ?token=$(cat …) sendet — byte-identisch zur gerenderten keys.json.
-      # Ergebnis newline-frei und atomar (tmp + mv) wie die Secrets selbst.
-      # Bewusst OHNE creates-Guard: bei out-of-band neu generiertem Stream-Key
-      # bleibt der Hash so garantiert konsistent zum Schlüssel.
-      # changed_when false: deterministische Funktion der Schlüsseldatei.
-      ansible.builtin.command:
-        argv:
-          - /bin/bash
-          - -c
-          - >-
-            umask 077;
-            printf %s "$(printf %s "$(cat '{{ mirotalkbro_rtp_dev_secrets_dir
-            }}/dev-stream-key.txt')"
-            | sha256sum | cut -d' ' -f1)"
-            > '{{ mirotalkbro_rtp_dev_secrets_dir
-            }}/dev-stream-key-hash.txt.tmp'
-            && mv '{{ mirotalkbro_rtp_dev_secrets_dir
-            }}/dev-stream-key-hash.txt.tmp' '{{ mirotalkbro_rtp_dev_secrets_dir
-            }}/dev-stream-key-hash.txt'
-      changed_when: false
       no_log: true
 
     - name: Secret-Dateien strikt auf 0600/root setzen
@@ -344,8 +325,6 @@
         - "{{ mirotalkbro_rtp_dev_secrets_dir }}/bro-ingest-secret.txt"
         - "{{ mirotalkbro_rtp_dev_secrets_dir }}/admin-token.txt"
         - "{{ mirotalkbro_rtp_dev_secrets_dir }}/api-key-secret.txt"
-        - "{{ mirotalkbro_rtp_dev_secrets_dir }}/dev-stream-key.txt"
-        - "{{ mirotalkbro_rtp_dev_secrets_dir }}/dev-stream-key-hash.txt"
 
     # --- Geheimnisse für Templates einlesen -----------------------------------
     # lookup('file', ...) läuft auf dem Controller; die Dateien liegen auf der
@@ -369,12 +348,6 @@
       register: dev_slurp_api_key_secret
       no_log: true
 
-    - name: Stream-Key-Hash einlesen
-      ansible.builtin.slurp:
-        src: "{{ mirotalkbro_rtp_dev_secrets_dir }}/dev-stream-key-hash.txt"
-      register: dev_slurp_stream_key_hash
-      no_log: true
-
     - name: Gelesene Dev-Secrets als Fakten bereitstellen
       ansible.builtin.set_fact:
         mirotalkbro_rtp_dev_bro_ingest_secret: >-
@@ -383,8 +356,6 @@
           {{ dev_slurp_admin_token.content | b64decode | trim }}
         mirotalkbro_rtp_dev_api_key_secret: >-
           {{ dev_slurp_api_key_secret.content | b64decode | trim }}
-        mirotalkbro_rtp_dev_stream_key_hash: >-
-          {{ dev_slurp_stream_key_hash.content | b64decode | trim }}
       no_log: true
 
     # --- Selbstsigniertes RTMPS-Dev-Zertifikat -------------------------------
@@ -434,11 +405,18 @@
         - "{{ mirotalkbro_rtp_dev_certs_dir }}/tls.crt"
         - "{{ mirotalkbro_rtp_dev_certs_dir }}/tls.key"
 
-    # --- keys.json für den Dev-Stream-Key rendern ----------------------------
+    # --- keys.json: statischer Fallback bewusst LEER -------------------------
+    # Die Dev-Instanz fährt auf Produktionsemantik (RTMP_REQUIRE_ROOM und
+    # RTMP_DYNAMIC_AUTH je Default true): Publish-Auth läuft dynamisch über
+    # die Rooms-Registry des BRO, nicht über statische Hashes. Die Datei muss
+    # dennoch EXISTIEREN, weil Compose sie read-only in den Adapter bind-
+    # mounted — ein fehlender Host-Pfad würde im Container als Verzeichnis
+    # entstehen. Ein leeres streams-Objekt hält den statischen Fallback
+    # fail-closed deaktiviert (kein statischer Key gültig).
 
-    - name: Keys.json für den Dev-Stream-Key rendern
-      ansible.builtin.template:
-        src: templates/dev-keys.json.j2
+    - name: Keys.json mit leerem streams-Objekt bereitstellen
+      ansible.builtin.copy:
+        content: '{"streams": {}}'
         dest: "{{ mirotalkbro_rtp_dev_config_dir }}/keys.json"
         owner: root
         group: root
@@ -525,7 +503,101 @@
       register: dev_bro_http_check
       failed_when: false
 
+    # --- RTMP-Dev-Raum über die Rooms-API anlegen ------------------------------
+    # Produktionsemantik (RTMP_REQUIRE_ROOM=true, Default): Externe Zufuhr nur
+    # in REGISTRIERTE RTMP-Räume; die Stream-Keys kommen per-Raum aus der
+    # In-Memory-Registry des BRO. Der Klartext-Key wird ausschließlich bei
+    # Anlage und Rotation zurückgegeben.
+    #
+    # Idempotenz: Existiert bereits ein Raum namens devstudio, wird dessen Key
+    # ROTIERT (der bisherige Klartext-Key ist nicht rekonstruierbar — die
+    # Registry speichert nur den sha256-Hash); andernfalls wird der Raum neu
+    # angelegt. Ein BRO-Neustart leert die Registry (Räume weg) — dann legt
+    # ein erneuter Playbook-Lauf den Raum einfach neu an.
+    #
+    # no_log zwingend: Die Antworten von Anlage UND Rotation enthalten den
+    # Klartext-Stream-Key; die finale Ausgabe unten druckt nur Pfade + Id.
+
+    - name: Vorhandene RTMP-Räume abfragen
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ mirotalkbro_rtp_dev_port }}/api/v1/rooms"
+        headers:
+          Authorization: "Bearer {{ mirotalkbro_rtp_dev_admin_token }}"
+        status_code: 200
+      register: dev_rooms_list
+      no_log: true
+
+    - name: Id eines vorhandenen DevStudio-Raums ermitteln
+      # Listenantworten enthalten bewusst nie Schlüsselmaterial (nur
+      # Metadaten), deshalb hier ohne no_log. Ergebnis ist '' oder eine UUID.
+      ansible.builtin.set_fact:
+        dev_existing_room_id: >-
+          {{ dev_rooms_list.json.rooms | default([])
+             | selectattr('name', 'defined')
+             | selectattr('name', 'equalto', mirotalkbro_rtp_dev_broadcast_id)
+             | map(attribute='id') | first | default('') }}
+
+    - name: RTMP-Dev-Raum anlegen (Quelle rtmp, Name devstudio)
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ mirotalkbro_rtp_dev_port }}/api/v1/rooms"
+        method: POST
+        body_format: json
+        body:
+          sourceType: rtmp
+          name: "{{ mirotalkbro_rtp_dev_broadcast_id }}"
+        headers:
+          Authorization: "Bearer {{ mirotalkbro_rtp_dev_admin_token }}"
+        status_code: 201
+      register: dev_room_created
+      when: dev_existing_room_id | length == 0
+      no_log: true
+
+    - name: Stream-Key des vorhandenen Dev-Raums rotieren
+      ansible.builtin.uri:
+        url: >-
+          http://127.0.0.1:{{ mirotalkbro_rtp_dev_port }}/api/v1/rooms/{{
+          dev_existing_room_id }}/rotate-key
+        method: POST
+        headers:
+          Authorization: "Bearer {{ mirotalkbro_rtp_dev_admin_token }}"
+        status_code: 200
+      register: dev_room_rotated
+      when: dev_existing_room_id | length > 0
+      no_log: true
+
+    - name: Dev-Raum-Fakten aus der Anlage übernehmen
+      # streamKey hat das Format '<roomId>?token=<key>'; das reine Token
+      # (hinter '?token=') wird zusätzlich separat geführt.
+      ansible.builtin.set_fact:
+        dev_room_id: "{{ dev_room_created.json.id }}"
+        dev_room_stream_key: "{{ dev_room_created.json.rtmp.streamKey }}"
+        dev_room_token: "{{ dev_room_created.json.rtmp.streamKey.split('?token=')[-1] }}"
+      when: dev_existing_room_id | length == 0
+      no_log: true
+
+    - name: Dev-Raum-Fakten aus der Rotation übernehmen
+      ansible.builtin.set_fact:
+        dev_room_id: "{{ dev_existing_room_id }}"
+        dev_room_stream_key: "{{ dev_room_rotated.json.streamKey }}"
+        dev_room_token: "{{ dev_room_rotated.json.streamKey.split('?token=')[-1] }}"
+      when: dev_existing_room_id | length > 0
+      no_log: true
+
+    - name: Dev-Stream-Key (Token, ohne Newline) unter .secrets ablegen
+      # Klartext-Token für den ffmpeg-One-Liner. Wird bei jedem Lauf mit dem
+      # frisch angelegten/rotierten Key überschrieben (die Registry speichert
+      # nur den Hash, ein alter Klartext-Key wäre danach ohnehin ungültig).
+      # copy:content hängt KEIN Newline an — $(cat …) bleibt byte-identisch.
+      ansible.builtin.copy:
+        content: "{{ dev_room_token }}"
+        dest: "{{ mirotalkbro_rtp_dev_secrets_dir }}/dev-stream-key.txt"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
     # --- Ergebnis ausgeben ----------------------------------------------------
+    # Bewusst OHNE Klartext-Key: nur Raum-Id und der Pfad der Token-Datei.
 
     - name: Dev-Zugang und Testkommandos ausgeben
       ansible.builtin.debug:
@@ -535,17 +607,29 @@
             Status {{ dev_bro_http_check.status | default('n/a') }}).
           - ""
           - >-
+            RTMP-Dev-Raum (Quelle rtmp, Name
+            {{ mirotalkbro_rtp_dev_broadcast_id }}) mit der Id
+            {{ dev_room_id }} bereit. Stream-Key-Token (Klartext, 0600/root):
+            {{ mirotalkbro_rtp_dev_secrets_dir }}/dev-stream-key.txt — der
+            Key wird bei jedem Playbook-Lauf neu angelegt bzw. rotiert.
+          - >-
+            Achtung: Die Raum-Registry liegt im Speicher des BRO — nach
+            jedem BRO-Neustart ist der Raum WEG (ein Publish erhält dann 401/
+            404; der Adapter wiederholt mit Backoff und stürzt nicht ab).
+            Zum Wiederherstellen dieses Playbook erneut ausführen oder den
+            Raum über die BRO-Weboberfläche neu anlegen/rotieren.
+          - ""
+          - >-
             Zugriff (bewusst Plain-HTTP, nur Dev; über das private
             Vagrant-Netz gebunden — vom Host und aus der VM erreichbar):
           - >-
-            Viewer für Broadcast {{ mirotalkbro_rtp_dev_broadcast_id }}:
+            Viewer für den RTMP-Raum:
             http://{{ mirotalkbro_rtp_dev_bind_ip }}:{{ mirotalkbro_rtp_dev_port
-            }}/viewer?id={{ mirotalkbro_rtp_dev_broadcast_id }}&name=viewer
+            }}/viewer?id={{ dev_room_id }}&name=viewer
           - >-
             Broadcast-Seite (Browser-Quelle, alternative Prüfung):
             http://{{ mirotalkbro_rtp_dev_bind_ip }}:{{ mirotalkbro_rtp_dev_port
-            }}/broadcast?id={{ mirotalkbro_rtp_dev_broadcast_id
-            }}&name=broadcaster
+            }}/broadcast?id={{ dev_room_id }}&name=broadcaster
           - ""
           - >-
             Test-Publish (RTMP-Endpunkt ebenfalls am privaten Vagrant-Netz —
@@ -555,19 +639,14 @@
             ffmpeg -re -f lavfi -i testsrc=size=1280x720:rate=30
             -f lavfi -i sine=frequency=440 -c:v libx264 -preset veryfast
             -tune zerolatency -pix_fmt yuv420p -c:a aac -ar 48000 -f flv
-            'rtmp://{{ mirotalkbro_rtp_dev_bind_ip }}:19350/live/{{
-            mirotalkbro_rtp_dev_broadcast_id }}?token=$(cat {{
-            mirotalkbro_rtp_dev_secrets_dir }}/dev-stream-key.txt)'
+            'rtmp://{{ mirotalkbro_rtp_dev_bind_ip }}:19350/live/{{ dev_room_id
+            }}?token=$(cat {{ mirotalkbro_rtp_dev_secrets_dir
+            }}/dev-stream-key.txt)'
           - ""
           - >-
             Hinweis RTMPS: Der öffentliche Ingest ist
-            rtmps://{{ ansible_host }}:1935/live mit Stream-Key
-            {{ mirotalkbro_rtp_dev_broadcast_id }}?token=<KEY>; das
-            selbstsignierte Dev-Zertifikat muss in OBS manuell vertraut
-            werden. Für Automatisierung daher :19350 (Plain-RTMP, per
-            Dev-Override nur am privaten Vagrant-Netz gebunden) verwenden.
-          - >-
-            Dev-Stream-Key (Klartext, 0600/root):
-            {{ mirotalkbro_rtp_dev_secrets_dir }}/dev-stream-key.txt —
-            SHA-256-Hash: {{ mirotalkbro_rtp_dev_secrets_dir
-            }}/dev-stream-key-hash.txt
+            rtmps://{{ ansible_host }}:1935/live, der Stream-Key hat das
+            Format {{ dev_room_id }}?token=<KEY> (KEY = Inhalt der Token-
+            Datei); das selbstsignierte Dev-Zertifikat muss in OBS manuell
+            vertraut werden. Für Automatisierung daher :19350 (Plain-RTMP,
+            per Dev-Override nur am privaten Vagrant-Netz gebunden) verwenden.
