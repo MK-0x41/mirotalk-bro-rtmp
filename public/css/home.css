@@ -477,3 +477,223 @@
         transition: none;
     }
 }
+
+/* Broadcast source selector (Camera | Screen | RTMP ingest) */
+
+.source-select {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.source-option {
+    min-height: 44px;
+    padding: 10px 8px;
+    color: var(--text-color);
+    background: var(--surface-color);
+    border: var(--border);
+    border-radius: 6px;
+    box-shadow: none;
+    font-size: 0.78rem;
+    font-weight: 700;
+}
+
+.source-option:hover {
+    background: var(--surface-hover);
+    box-shadow: none;
+    transform: none;
+}
+
+.source-option.is-active {
+    color: #fff;
+    background: var(--home-accent);
+    border-color: var(--home-accent);
+}
+
+/* RTMP ingest is unavailable outside SFU mode */
+.source-option:disabled {
+    color: var(--text-secondary);
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+.source-option:disabled:hover {
+    background: var(--surface-color);
+    box-shadow: none;
+    transform: none;
+}
+
+/* RTMP room panel (shown inline after room creation) */
+
+.rtmp-panel {
+    display: grid;
+    gap: 16px;
+    padding: 20px;
+    background: var(--primary-color);
+    border: var(--border);
+    border-radius: 8px;
+}
+
+.rtmp-panel[hidden] {
+    display: none;
+}
+
+.rtmp-panel-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.rtmp-panel-head h2 {
+    font-size: 1.35rem;
+    font-weight: 600;
+}
+
+.rtmp-status {
+    min-height: 34px;
+    padding: 6px 12px;
+    color: var(--text-secondary);
+    background: var(--surface-color);
+    border: var(--border);
+    border-radius: var(--border-radius-full);
+    box-shadow: none;
+    font-size: 0.72rem;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.rtmp-status:hover {
+    background: var(--surface-hover);
+    box-shadow: none;
+    transform: none;
+}
+
+.rtmp-status.is-live {
+    color: #fff;
+    background: #dc2626;
+    border-color: #dc2626;
+}
+
+.rtmp-field {
+    display: grid;
+    gap: 6px;
+}
+
+.rtmp-field > label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+
+.rtmp-field > label i {
+    width: 16px;
+    color: var(--home-accent);
+    text-align: center;
+}
+
+.rtmp-value-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+
+.rtmp-value {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    padding: 10px 12px;
+    color: var(--text-color);
+    background: var(--secondary-color);
+    border: 1px solid transparent;
+    border-radius: 6px;
+    box-shadow: var(--box-shadow);
+    font-size: 0.85rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.rtmp-muted {
+    flex: 0 1 auto;
+    color: var(--text-secondary);
+}
+
+.rtmp-copy {
+    flex: 0 0 auto;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    color: var(--text-secondary);
+    background: transparent;
+    border: 0;
+    box-shadow: none;
+}
+
+.rtmp-copy:hover {
+    color: var(--home-accent);
+    background: var(--surface-hover);
+    box-shadow: none;
+    transform: none;
+}
+
+.rtmp-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.rtmp-actions button {
+    min-height: 40px;
+    padding: 8px 14px;
+    border-radius: 6px;
+    box-shadow: none;
+    font-size: 0.78rem;
+    font-weight: 700;
+}
+
+.rtmp-actions .danger {
+    color: #dc2626;
+    border-color: rgba(220, 38, 38, 0.35);
+}
+
+.rtmp-actions .danger:hover {
+    color: #dc2626;
+    background: rgba(220, 38, 38, 0.12);
+}
+
+.rtmp-hint,
+.rtmp-note {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: 0.72rem;
+    line-height: 1.5;
+}
+
+.rtmp-hint i,
+.rtmp-note i {
+    color: var(--home-accent);
+}
+
+@media (max-width: 520px) {
+    .source-select {
+        grid-template-columns: 1fr;
+    }
+
+    .rtmp-panel {
+        padding: 16px;
+    }
+
+    .rtmp-value-row {
+        flex-wrap: wrap;
+    }
+
+    .rtmp-actions button {
+        flex: 1 1 100%;
+    }
+}

@@ -4,6 +4,8 @@ const broadcastID = new URLSearchParams(window.location.search).get('id');
 const username = new URLSearchParams(window.location.search).get('name');
 const adminToken = new URLSearchParams(window.location.search).get('token') || '';
 const roomURL = window.location.origin + '/home?id=' + broadcastID;
+// Only 'screen' changes the startup flow; anything else (or absent) keeps the default camera behavior
+const isScreenSource = new URLSearchParams(window.location.search).get('source') === 'screen';
 
 console.log('Broadcaster', {
     username: username,
@@ -158,6 +160,9 @@ let broadcastStream = null;
 let zoom = 1;
 let isVideoMirrored = false;
 let screenShareEnabled = false;
+
+// True while the initial ?source=screen share has not gone live yet (start deferred to a user gesture)
+let screenSourcePending = false;
 let messagesFormOpen = false;
 let viewersFormOpen = false;
 let settingsFormOpen = false;
@@ -1000,6 +1005,50 @@ function toggleScreen() {
 }
 
 // =====================================================
+// Handle ?source=screen session start (fresh user gesture)
+// =====================================================
+
+function startScreenSourceSession() {
+    if (
+        isMobileDevice ||
+        !(navigator.getDisplayMedia || (navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia))
+    ) {
+        elementDisplay(screenShareStart, false);
+        return popupMessage(
+            'warning',
+            'Screen share',
+            'Screen sharing is not supported by this browser on this device.'
+        );
+    }
+    promptScreenShareStart();
+}
+
+function promptScreenShareStart() {
+    Swal.fire({
+        icon: 'info',
+        title: 'Ready to share your screen',
+        html: 'Click <strong>Start</strong> and pick the screen, window or tab to broadcast.',
+        confirmButtonText: '<i class="fas fa-display"></i> Start',
+        showClass: { popup: 'animate__animated animate__fadeInDown' },
+        hideClass: { popup: 'animate__animated animate__fadeOutUp' },
+    }).then((result) => {
+        if (!result.isConfirmed || screenShareEnabled) return;
+        // Same screen path as the toolbar button: getStream() -> getDisplayMedia -> gotScreenStream -> broadcast
+        screenSourcePending = true;
+        screenShareEnabled = true;
+        elementDisplay(screenShareStop, true);
+        elementDisplay(screenShareStart, false);
+        getStream()
+            .then(getDevices)
+            .then(gotDevices)
+            .then(() => {
+                // Live: from here on the screen share buttons behave exactly like upstream
+                if (screenShareEnabled) screenSourcePending = false;
+            });
+    });
+}
+
+// =====================================================
 // Handle recording
 // =====================================================
 
@@ -1566,7 +1615,12 @@ audioOutputTestBtn.onclick = () => {
     playSound('speaker');
 };
 
-getStream().then(getDevices).then(gotDevices);
+if (isScreenSource) {
+    // Deferred start: getDisplayMedia needs a fresh user gesture, so getStream() must not auto-run on load
+    startScreenSourceSession();
+} else {
+    getStream().then(getDevices).then(gotDevices);
+}
 
 function getStream() {
     try {
@@ -1734,6 +1788,19 @@ function applyAudioOutput(sinkId) {
 function handleMediaDeviceError(error) {
     console.error('Error', error);
     if (screenShareEnabled) {
+        if (screenSourcePending) {
+            // The initial ?source=screen pickup failed or was canceled:
+            // go back to the ready prompt instead of falling back to the camera.
+            screenSourcePending = false;
+            screenShareEnabled = false;
+            elementDisplay(screenShareStop, false);
+            elementDisplay(screenShareStart, true);
+            if (error && error.name !== 'NotAllowedError' && error.name !== 'AbortError') {
+                handleMediaStreamError(error);
+            }
+            promptScreenShareStart();
+            return;
+        }
         toggleScreen();
     } else {
         handleMediaStreamError(error);

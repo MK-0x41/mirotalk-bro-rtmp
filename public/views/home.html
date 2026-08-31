@@ -117,6 +117,23 @@
                     </div>
                 </div>
 
+                <div id="sourceSelectGroup" class="field-group">
+                    <label id="sourceSelectLabel" class="not-selectable"
+                        ><i class="fas fa-tower-broadcast"></i>Broadcast source</label
+                    >
+                    <div id="sourceSelect" class="source-select" role="group" aria-label="Broadcast source">
+                        <button id="sourceCamera" class="source-option is-active" type="button" aria-pressed="true">
+                            <i class="fas fa-video"></i>Camera
+                        </button>
+                        <button id="sourceScreen" class="source-option" type="button" aria-pressed="false">
+                            <i class="fas fa-display"></i>Screen
+                        </button>
+                        <button id="sourceRtmp" class="source-option" type="button" aria-pressed="false">
+                            <i class="fas fa-satellite-dish"></i>RTMP ingest
+                        </button>
+                    </div>
+                </div>
+
                 <div class="role-actions" aria-label="Choose how to join">
                     <div id="broadcasterLabel" class="role-copy">
                         <i class="fas fa-tower-broadcast"></i>
@@ -136,6 +153,110 @@
                         Join broadcast <i class="fas fa-arrow-right"></i>
                     </button>
                 </div>
+
+                <section id="rtmpPanel" class="rtmp-panel" hidden aria-labelledby="rtmpPanelTitle">
+                    <div class="rtmp-panel-head">
+                        <div>
+                            <p class="panel-kicker">External encoder</p>
+                            <h2 id="rtmpPanelTitle">RTMP room</h2>
+                        </div>
+                        <button id="rtmpStatus" class="rtmp-status" type="button" title="Room status">
+                            Waiting for encoder…
+                        </button>
+                    </div>
+
+                    <div class="rtmp-field">
+                        <label class="not-selectable"><i class="fas fa-hashtag"></i>Room</label>
+                        <div class="rtmp-value-row">
+                            <span id="rtmpRoomName" class="rtmp-value"></span>
+                            <span id="rtmpRoomId" class="rtmp-value rtmp-muted"></span>
+                            <button
+                                id="rtmpCopyRoomId"
+                                class="rtmp-copy"
+                                type="button"
+                                aria-label="Copy room ID"
+                                title="Copy room ID"
+                            >
+                                <i class="fas fa-copy"></i>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="rtmp-field">
+                        <label class="not-selectable"><i class="fas fa-satellite-dish"></i>Ingest server</label>
+                        <div class="rtmp-value-row">
+                            <span id="rtmpIngestServer" class="rtmp-value"></span>
+                            <button
+                                id="rtmpCopyIngest"
+                                class="rtmp-copy"
+                                type="button"
+                                aria-label="Copy ingest server"
+                                title="Copy ingest server"
+                            >
+                                <i class="fas fa-copy"></i>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="rtmp-field">
+                        <label class="not-selectable"><i class="fas fa-key"></i>Stream key</label>
+                        <div class="rtmp-value-row">
+                            <span id="rtmpStreamKey" class="rtmp-value">••••••••</span>
+                            <button
+                                id="rtmpToggleKey"
+                                class="rtmp-copy"
+                                type="button"
+                                aria-label="Reveal stream key"
+                                title="Reveal"
+                            >
+                                <i class="fas fa-eye"></i>
+                            </button>
+                            <button
+                                id="rtmpCopyKey"
+                                class="rtmp-copy"
+                                type="button"
+                                aria-label="Copy stream key"
+                                title="Copy"
+                            >
+                                <i class="fas fa-copy"></i>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="rtmp-field">
+                        <label class="not-selectable"><i class="fas fa-eye"></i>Viewer URL</label>
+                        <div class="rtmp-value-row">
+                            <span id="rtmpViewerUrl" class="rtmp-value"></span>
+                            <button
+                                id="rtmpCopyViewerUrl"
+                                class="rtmp-copy"
+                                type="button"
+                                aria-label="Copy viewer URL"
+                                title="Copy viewer URL"
+                            >
+                                <i class="fas fa-copy"></i>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="rtmp-actions">
+                        <button id="rtmpRotateKey" type="button"><i class="fas fa-rotate"></i>Rotate key</button>
+                        <button id="rtmpOpenViewer" type="button"><i class="fas fa-play"></i>Open viewer</button>
+                        <button id="rtmpDeleteRoom" class="danger" type="button">
+                            <i class="fas fa-trash"></i>Delete room
+                        </button>
+                    </div>
+
+                    <p class="rtmp-hint">
+                        <i class="fas fa-circle-info"></i> In OBS: Custom RTMP server = ingest server, Stream key = the
+                        value above.
+                    </p>
+                    <p class="rtmp-note">
+                        <i class="fas fa-shield-halved"></i> The stream key is shown only once. Rotating the key
+                        revokes the old key for new connections immediately; a connected encoder may keep its session
+                        until it disconnects. Deleting the room stops the ingest best-effort.
+                    </p>
+                </section>
             </section>
         </main>
 
