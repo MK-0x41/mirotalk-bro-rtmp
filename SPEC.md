@@ -570,6 +570,13 @@ Upstream verweisen und die vorgenommenen Änderungen benennen.
   veröffentlicht.
 - Stream-Keys und Tokens werden in Logs redigiert. Insbesondere dürfen weder
   der Adapter noch das SPEC-Runbook Query-Strings protokollieren.
+- Bei Verbindungsfehlern schreibt FFmpeg selbst die vollständige RTMP-URL
+  einschließlich `?token=...` auf die lokale `stderr` des Publisher-Hosts. Die
+  Container-Logs dieses Stacks sind davon nicht betroffen; betroffen sind nur
+  die Shell bzw. das lokale Log des Encoders. One-Liner und Testskripte mit
+  enthaltenem Token daher nicht in gemeinsam genutzten Logs oder Shell-Histories
+  ausführen, sondern den Token aus einer Datei lesen und `stderr` vor der
+  Weiterleitung filtern.
 - Der Authentifizierungsendpunkt ist rate-limitiert.
 - Je Path ist genau ein Publisher erlaubt.
 - FFmpeg-Argumente haben eine feste Form. Benutzereingaben gelangen nicht in

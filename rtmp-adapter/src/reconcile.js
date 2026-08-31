@@ -28,6 +28,10 @@
  *              down (ffmpeg TERM/KILL) and clears the state, so the normal
  *              start path re-runs with fresh ports/SSRCs. Transient status
  *              failures only skip the cycle (debug log) — never tear down.
+ * Idle health   -> with no due ingests the same status GET runs at most once
+ *              per 30s (TTL) as a reachability probe, so /healthz's
+ *              broReachable stays truthful even with zero running ingests
+ *              (debug-level logging only; ingest handling is untouched).
  * Ingest cap   -> MAX_CONCURRENT_INGESTS (config.js, default 4): new ingests
  *              are deferred while the cap is reached (error logged at most
  *              once per path per cooldown); existing ingests are unaffected.
@@ -64,6 +68,10 @@ const STABLE_RUNTIME_MS = 5 * 60 * 1000;
 const HTTP_TIMEOUT_MS = 5000;
 // BRO-restart re-attach: at most one status check per ingest per interval.
 const STATUS_CHECK_INTERVAL_MS = 30 * 1000;
+// healthz idle refresh: with no due ingests the status check never runs, so
+// broReachable would freeze at its last value. A lightweight status probe
+// (same GET) refreshes the flag at most once per TTL — cheap and debug-only.
+const BRO_REACHABILITY_TTL_MS = 30 * 1000;
 // Cap warning throttle: error-level at most once per path per cooldown.
 const CAP_WARN_COOLDOWN_MS = 60 * 1000;
 
@@ -163,6 +171,9 @@ class Reconciler {
 
         // health cache, updated every cycle (read by /healthz)
         this.health = { mediamtxReachable: false, broReachable: false };
+        // Timestamp of the last BRO reachability refresh (start POST or
+        // status GET); gates the idle probe for /healthz truthfulness.
+        this.lastBroReachabilityAt = 0;
     }
 
     start() {
@@ -290,8 +301,10 @@ class Reconciler {
         try {
             ingest = await this.broStart(broadcastId);
             this.health.broReachable = true;
+            this.lastBroReachabilityAt = this.now();
         } catch (err) {
             this.health.broReachable = false;
+            this.lastBroReachabilityAt = this.now();
             if (isRestart) {
                 state.restartAttempts += 1;
                 const delay = backoffDelay(state.restartAttempts);
@@ -493,12 +506,18 @@ class Reconciler {
                 due.push([broadcastId, state]);
             }
         }
-        if (due.length === 0) return;
+        if (due.length === 0) {
+            // Idle (zero running ingests or none due): keep broReachable
+            // truthful via the cheap TTL probe instead of freezing the flag.
+            await this.probeBroReachabilityWhenIdle(now);
+            return;
+        }
 
         let activeIds;
         try {
             activeIds = await this.broStatusActiveIds();
             this.health.broReachable = true;
+            this.lastBroReachabilityAt = now;
         } catch (err) {
             // Tolerance: one failed GET = skip this cycle entirely.
             this.log.debug('BRO status check failed, skipping this cycle', { error: err.message });
@@ -516,6 +535,29 @@ class Reconciler {
                     this.log.error('re-attach teardown failed', { broadcastId, error: err.message });
                 }
             }
+        }
+    }
+
+    /**
+     * Idle health probe: with no due ingests the status check above never
+     * runs and /healthz's broReachable would freeze at its initial/last
+     * value (e.g. false forever with zero running ingests). At most once
+     * per BRO_REACHABILITY_TTL_MS, reuse the same lightweight status GET to
+     * refresh the flag truthfully. A failure flips broReachable to false
+     * (debug log, no spam — the TTL throttles to one probe per 30s); the
+     * result of the probe (the active id set) is intentionally ignored, so
+     * ingest handling is untouched. mediamtxReachable needs no probe: it is
+     * refreshed by listActivePaths on every cycle.
+     */
+    async probeBroReachabilityWhenIdle(now) {
+        if (now - this.lastBroReachabilityAt < BRO_REACHABILITY_TTL_MS) return;
+        this.lastBroReachabilityAt = now;
+        try {
+            await this.broStatusActiveIds();
+            this.health.broReachable = true;
+        } catch (err) {
+            this.health.broReachable = false;
+            this.log.debug('idle BRO reachability probe failed', { error: err.message });
         }
     }
 

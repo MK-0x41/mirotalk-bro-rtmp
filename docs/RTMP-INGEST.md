@@ -346,6 +346,14 @@ Das Secret nicht in Shell-History, Tickets oder Logs übernehmen. Bei einem
 Zugriff aus dem Adapter-Container ist dessen interne BRO-Adresse statt
 `127.0.0.1` zu verwenden.
 
+Bei Verbindungsfehlern schreibt FFmpeg selbst die vollständige RTMP-URL
+einschließlich `?token=...` auf die lokale `stderr` des Publisher-Hosts. Die
+Container-Logs dieses Stacks sind davon nicht betroffen; betroffen sind nur die
+Shell bzw. das lokale Log des Encoders. One-Liner und Testskripte mit enthaltenem
+Token daher nicht in gemeinsam genutzten Logs oder Shell-Histories ausführen,
+sondern den Token aus einer Datei lesen und `stderr` vor der Weiterleitung
+filtern.
+
 ### Häufige Ursachen
 
 - **401 trotz gültigem Token:** Path muss `live/<roomId>` der registrierten

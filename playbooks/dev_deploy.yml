@@ -464,37 +464,83 @@
       # hier bewusst grob (Dev-Wiederhollauf ist unproblematisch).
       changed_when: true
 
-    - name: Compose-Stack starten (docker compose up -d, mit Dev-Override)
-      ansible.builtin.command:
-        argv:
-          - docker
-          - compose
-          - --project-directory
-          - "{{ mirotalkbro_rtp_project_dir }}"
-          - -f
-          - "{{ mirotalkbro_rtp_project_dir }}/docker-compose.yml"
-          - -f
-          - "{{ mirotalkbro_rtp_project_dir }}/docker-compose.dev-override.yml"
-          - up
-          - -d
-        chdir: "{{ mirotalkbro_rtp_project_dir }}"
-      environment:
-        DEV_BIND_IP: "{{ mirotalkbro_rtp_dev_bind_ip }}"
-      register: dev_compose_up
-      changed_when: >-
-        'Started' in (dev_compose_up.stdout + dev_compose_up.stderr)
-        or 'Created' in (dev_compose_up.stdout + dev_compose_up.stderr)
-        or 'Recreated' in (dev_compose_up.stdout + dev_compose_up.stderr)
-        or 'Pulling' in (dev_compose_up.stdout + dev_compose_up.stderr)
-        or 'Removed' in (dev_compose_up.stdout + dev_compose_up.stderr)
+    # --- Compose-Stack starten und Bereitschaft abwarten ----------------------
+    #
+    # Robustheit (E2E-Befund D2): Schlägt der erste `compose up` fehl (z. B.
+    # Port-Race mit einem kurzlebigen Prozess), startet ein Wiederholungslauf
+    # mit plain `up -d` womöglich nur den VORERSTELLTEN Container — ohne die
+    # Port-Bindings aus dem Dev-Override — und das nachfolgende wait_for auf
+    # den BRO-Port läuft ins Timeout. Deshalb block/rescue: Der Regelfall
+    # startet den Stack wie bisher und wartet auf den Web-Port. Schlägt
+    # eines von beiden genau EINMAL fehl, erzwingt der Rescue-Pfad
+    # `up -d --force-recreate` (Container werden aus der AKTUELLEN Compose-
+    # Konfiguration inkl. Dev-Override-Bindings neu angelegt) und wartet
+    # erneut. Schlägt auch das, schlägt der Rescue hart fehl und der Lauf
+    # bricht ab (normales Ansible-Verhalten fehlgeschlagener Rescue-Tasks).
+
+    - name: Compose-Stack starten und Bereitschaft prüfen
+      block:
+        - name: Compose-Stack starten (docker compose up -d, mit Dev-Override)
+          ansible.builtin.command:
+            argv:
+              - docker
+              - compose
+              - --project-directory
+              - "{{ mirotalkbro_rtp_project_dir }}"
+              - -f
+              - "{{ mirotalkbro_rtp_project_dir }}/docker-compose.yml"
+              - -f
+              - "{{ mirotalkbro_rtp_project_dir }}/docker-compose.dev-override.yml"
+              - up
+              - -d
+              - --remove-orphans
+            chdir: "{{ mirotalkbro_rtp_project_dir }}"
+          environment:
+            DEV_BIND_IP: "{{ mirotalkbro_rtp_dev_bind_ip }}"
+          register: dev_compose_up
+          changed_when: >-
+            'Started' in (dev_compose_up.stdout + dev_compose_up.stderr)
+            or 'Created' in (dev_compose_up.stdout + dev_compose_up.stderr)
+            or 'Recreated' in (dev_compose_up.stdout + dev_compose_up.stderr)
+            or 'Pulling' in (dev_compose_up.stdout + dev_compose_up.stderr)
+            or 'Removed' in (dev_compose_up.stdout + dev_compose_up.stderr)
+
+        - name: Auf den BRO-Web-Port warten (VM-lokal, Loopback-Binding)
+          ansible.builtin.wait_for:
+            host: 127.0.0.1
+            port: "{{ mirotalkbro_rtp_dev_port }}"
+            timeout: 120
+
+      rescue:
+        # Einmalige Hart-Neuanlage: verwirft einen ggf. laufenden Container
+        # ohne Port-Bindings und erzwingt den Start aus der aktuellen
+        # Compose-Konfiguration. command meldet per Default `changed`.
+        - name: Compose-Stack neu erzwingen (up -d --force-recreate)
+          ansible.builtin.command:
+            argv:
+              - docker
+              - compose
+              - --project-directory
+              - "{{ mirotalkbro_rtp_project_dir }}"
+              - -f
+              - "{{ mirotalkbro_rtp_project_dir }}/docker-compose.yml"
+              - -f
+              - "{{ mirotalkbro_rtp_project_dir }}/docker-compose.dev-override.yml"
+              - up
+              - -d
+              - --force-recreate
+              - --remove-orphans
+            chdir: "{{ mirotalkbro_rtp_project_dir }}"
+          environment:
+            DEV_BIND_IP: "{{ mirotalkbro_rtp_dev_bind_ip }}"
+
+        - name: Erneut auf den BRO-Web-Port warten (nach force-recreate)
+          ansible.builtin.wait_for:
+            host: 127.0.0.1
+            port: "{{ mirotalkbro_rtp_dev_port }}"
+            timeout: 120
 
     # --- Bereitschafts- und Funktionsprüfung ----------------------------------
-
-    - name: Auf den BRO-Web-Port warten (VM-lokal, Loopback-Binding)
-      ansible.builtin.wait_for:
-        host: 127.0.0.1
-        port: "{{ mirotalkbro_rtp_dev_port }}"
-        timeout: 120
 
     - name: BRO-Startseite abrufen (Status nur informativ)
       ansible.builtin.uri:
