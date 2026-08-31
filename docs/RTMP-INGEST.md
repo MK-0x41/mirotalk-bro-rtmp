@@ -86,7 +86,7 @@ Nach erfolgreichem Deployment:
   namens `devstudio` angelegt — oder, wenn er aus einem früheren Lauf noch
   existierte, dessen Stream-Key rotiert — und die Raum-Id (UUID) sowie den
   Pfad der Token-Datei ausgegeben.
-- Viewer: `http://192.168.56.5:3016/viewer?id=<roomId>&name=viewer` — die
+- Viewer: `https://192.168.56.5:3016/viewer?id=<roomId>&name=viewer` — die
   konkrete Raum-Id steht in der Playbook-Ausgabe.
 - Dev-Stream-Key (Klartext-Token) in der VM:
   `/opt/mirotalkbro-rtmp/.secrets/dev-stream-key.txt` (0600/root, ohne
@@ -114,6 +114,51 @@ Playbook bewusst mit leerem `streams`-Objekt bereit: Der statische Key-Fallback
 ist damit deaktiviert (fail-closed), die Authentifizierung läuft vollständig
 über die Rooms-Registry (`RTMP_REQUIRE_ROOM=true` und `RTMP_DYNAMIC_AUTH=true`,
 je Produktions-Default — die Dev-Instanz setzt beide bewusst nicht).
+
+### Dev-TLS (Selfsigned)
+
+Die Dev-Weboberfläche ist über `https://192.168.56.5:3016` erreichbar. Beim
+ersten Aufruf muss die einmalige Zertifikatswarnung im Browser akzeptiert
+werden. Danach läuft die Seite in einem Secure Context; Kamera,
+Bildschirmfreigabe und Clipboard funktionieren dann wie vorgesehen. Die
+Copy-Buttons haben zusätzlich einen `execCommand`-Fallback und funktionieren
+auch ohne TLS, HTTPS ist im Dev-Betrieb aber der Normalweg.
+
+Das selbstsignierte Zertifikat enthält die SANs
+`DNS:mirotalkbro-rtmp-dev.test` und `IP:192.168.56.5`. Es bleibt in
+`<project>/.secrets/` persistent und wird für MediaMTX nach `certs/` kopiert;
+dadurch ist nach einem Re-Deploy keine erneute Browser-Bestätigung nötig.
+
+Wird `mirotalkbro_rtmp_dev_bind_ip` oder die Dev-Domain geändert, bleibt das
+persistente Zertifikat alt (SAN veraltet): einmalig auf der VM
+`sudo rm /opt/mirotalkbro-rtmp/.secrets/tls.crt /opt/mirotalkbro-rtmp/.secrets/tls.key`
+ausführen und das Playbook neu laufen lassen — das Zertifikat wird neu
+generiert; Browser-Ausnahme und ggf. Truststore-Import werden erneut fällig.
+
+OBS kann optional über RTMPS senden:
+
+1. Das öffentliche Zertifikat aus der VM holen und lokal speichern (nur
+   `tls.crt`, niemals den privaten Schlüssel):
+
+   ```bash
+   vagrant ssh -c 'sudo cat /opt/mirotalkbro-rtmp/certs/tls.crt' > dev-tls.crt
+   ```
+
+2. `dev-tls.crt` im Betriebssystem-Truststore importieren. Unter Linux die
+   Datei nach `/usr/local/share/ca-certificates/` kopieren und danach
+   `sudo update-ca-certificates` ausführen; unter macOS im Schlüsselbund
+   „System“ als vertrauenswürdiges Zertifikat importieren; unter Windows in
+   „Vertrauenswürdige Stammzertifizierungsstellen“ importieren.
+
+3. In OBS `rtmps://192.168.56.5:1935/live` als Server verwenden. Dank des
+   IP-SANs wird die Adresse nach dem Truststore-Import akzeptiert. Ohne Import
+   bleibt der interne Plain-Port mit identischer Authentifizierung verfügbar:
+   `rtmp://192.168.56.5:19350/live`.
+
+Zertifikats- und Schlüsseldateien nie aus der VM kopieren; die einzige gezielte
+Ausnahme ist der Import des öffentlichen Zertifikats `tls.crt` in den lokalen
+Truststore. Bei „Copy-Buttons gehen nicht“ wurde wahrscheinlich HTTP statt
+HTTPS verwendet: Der Fallback existiert, HTTPS ist dennoch der Dev-Normalweg.
 
 ### Fast-Track (Hot Reload)
 

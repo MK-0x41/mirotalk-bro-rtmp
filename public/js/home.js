@@ -605,10 +605,62 @@ rtmpCopyKey.addEventListener('click', () => {
     }
 });
 
+// navigator.clipboard requires a secure context (HTTPS), so fall back to the
+// classic execCommand('copy') path to keep copy buttons working on plain HTTP.
+function copyToClipboard(text) {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        return navigator.clipboard.writeText(text).catch(() => legacyCopyToClipboard(text));
+    }
+    return legacyCopyToClipboard(text);
+}
+
+function legacyCopyToClipboard(text) {
+    return new Promise((resolve, reject) => {
+        const activeElement = document.activeElement;
+        const isTextControl = activeElement && /^(input|textarea)$/i.test(activeElement.tagName);
+        const selStart = isTextControl ? activeElement.selectionStart : null;
+        const selEnd = isTextControl ? activeElement.selectionEnd : null;
+        const selection = window.getSelection();
+        const selectedRange =
+            selection && selection.rangeCount === 1 && !isTextControl ? selection.getRangeAt(0).cloneRange() : null;
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.setAttribute('readonly', '');
+        textarea.style.position = 'fixed';
+        textarea.style.top = '0';
+        textarea.style.left = '-9999px'; // off-screen
+        document.body.appendChild(textarea);
+        try {
+            textarea.focus();
+            textarea.select();
+            const copied = document.execCommand('copy');
+            if (!copied) return reject(new Error('execCommand copy failed'));
+            resolve();
+        } catch (error) {
+            reject(error);
+        } finally {
+            textarea.remove();
+            if (activeElement && typeof activeElement.focus === 'function') {
+                activeElement.focus();
+                if (isTextControl && selStart !== null && selEnd !== null) {
+                    try {
+                        activeElement.setSelectionRange(selStart, selEnd);
+                    } catch (e) {
+                        /* restoring the previous selection is best-effort */
+                    }
+                }
+            }
+            if (selectedRange && selection) {
+                selection.removeAllRanges();
+                selection.addRange(selectedRange);
+            }
+        }
+    });
+}
+
 function copyRtmpValue(value, title) {
     if (!value) return;
-    navigator.clipboard
-        .writeText(value)
+    copyToClipboard(value)
         .then(() => popupMessage('toast', title, 'Copied to clipboard', 'top', 2000))
         .catch(() => popupMessage('error', title, 'Copy to clipboard failed'));
 }

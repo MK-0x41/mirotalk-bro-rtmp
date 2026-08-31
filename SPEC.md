@@ -464,9 +464,12 @@ Umgebungsvariablen-Overrides):
 8. Anschließend `docker compose -f docker-compose.yml
    -f docker-compose.dev-override.yml up -d` ausführen.
 
-Der Dev-Zugriff erfolgt über `http://192.168.56.5:3016`. Dies ist absichtlich
-Plain-HTTP für Development; TLS-Terminierung durch Nginx ist ein
-Produktionsaspekt.
+Der Dev-Zugriff erfolgt über `https://192.168.56.5:3016`; der Dev-Override
+terminiert TLS via `httpolyglot` auf Port 3016. Das selbstsignierte Zertifikat
+enthält die SANs `DNS:mirotalkbro-rtmp-dev.test` und `IP:192.168.56.5`, liegt
+persistent in `.secrets/` und wird für MediaMTX nach `certs/` kopiert, sodass es
+einen Projekt-Wipe übersteht. Die Produktionsumgebung bleibt unverändert und
+terminiert TLS weiterhin am Host-Nginx im Installer.
 
 Zum Testen kann über das interne RTMP auf `192.168.56.5:19350` publiziert
 werden. Für automatisierte Tests ist dieser Weg zu verwenden, da ein

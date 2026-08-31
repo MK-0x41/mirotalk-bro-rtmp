@@ -1,7 +1,16 @@
 # ============================================================================
 # Dev-only Override: zusätzliche Bindings am privaten Vagrant-Netz
-# (192.168.56.5). NIEMALS in Produktion verwenden — Basis-Compose bleibt
-# loopback-only (3016 auf 127.0.0.1; 19350 und 9997 gar nicht veröffentlicht).
+# (192.168.56.5) plus Dev-Web-TLS. NIEMALS in Produktion verwenden — Basis-
+# Compose bleibt loopback-only (3016 auf 127.0.0.1; 19350 und 9997 gar nicht
+# veröffentlicht); in Produktion terminiert der Host-Nginx TLS.
+#
+# Dev-Web-TLS: server.js liest die TLS-Dateien fix aus
+# /src/app/ssl/{cert.pem,key.pem} (keine Env-Steuerung) — hier wird das vom
+# Dev-Playbook generierte Zertifikat (SAN mit Dev-Domain + Bind-IP) read-only
+# genau dorthin gemountet, damit der Browser einen Secure-Context erhält
+# (Kamera/Screen-Share, Clipboard-API). tls.key ist auf der VM bewusst
+# 0600 mit Eigentümer 1000:1000 (node-User des bro-Containers), siehe
+# playbooks/dev_deploy.yml.
 #
 # Einbindung (siehe playbooks/dev_deploy.yml):
 #   docker compose -f docker-compose.yml -f docker-compose.dev-override.yml up -d
@@ -12,6 +21,11 @@
 # ============================================================================
 services:
     bro:
+        volumes:
+            # Nur Dev: Dev-Cert mit IP-SAN über die fixen server.js-Pfade
+            # mounten (read-only) — Produktion terminiert TLS am Host-Nginx.
+            - ./certs/tls.crt:/src/app/ssl/cert.pem:ro
+            - ./certs/tls.key:/src/app/ssl/key.pem:ro
         ports:
             - '${DEV_BIND_IP:-192.168.56.5}:${PORT:-3016}:${PORT:-3016}'
     mediamtx:

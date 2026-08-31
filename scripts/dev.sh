@@ -157,7 +157,7 @@ Weg B (manuell in der VM erzeugen — vagrant ssh, dann):
     openssl req -x509 -nodes -newkey rsa:4096 -days 3650 \\
         -keyout certs/tls.key -out certs/tls.crt \\
         -subj "/CN=mirotalkbro-rtmp-dev.test" \\
-        -addext subjectAltName=DNS:mirotalkbro-rtmp-dev.test \\
+        -addext subjectAltName=DNS:mirotalkbro-rtmp-dev.test,IP:192.168.56.5 \\
         -addext basicConstraints=critical,CA:FALSE \\
         -addext keyUsage=critical,digitalSignature,keyEncipherment \\
         -addext extendedKeyUsage=serverAuth

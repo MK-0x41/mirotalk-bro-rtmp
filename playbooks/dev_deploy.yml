@@ -205,9 +205,10 @@
         # (räumen → entpacken → rendern) ist wesentlich: Die Render-Artefakte
         # (.env, certs/tls.*, config/keys.json) werden NACH dem Räumen neu
         # erzeugt — .env bedingungslos per Template, keys.json bedingungslos
-        # mit leerem streams-Fallback, das Zertifikat über seinen creates-Guard
-        # (nach dem Räumen erneut angelegt; akzeptables Dev-Verhalten). Secrets
-        # überleben in .secrets.
+        # mit leerem streams-Fallback. Das TLS-Zertifikat (und damit der
+        # Browser-Secure-Context der Dev-Weboberfläche) überlebt den Wipe in
+        # .secrets/tls.* und wird nach dem Räumen per force-Kopie erneut nach
+        # certs/ synchronisiert. Secrets überleben in .secrets.
         - name: Projektverzeichnis räumen (alles außer .secrets)
           ansible.builtin.command:
             argv:
@@ -358,14 +359,22 @@
           {{ dev_slurp_api_key_secret.content | b64decode | trim }}
       no_log: true
 
-    # --- Selbstsigniertes RTMPS-Dev-Zertifikat -------------------------------
+    # --- Selbstsigniertes Dev-TLS-Zertifikat (RTMPS + Dev-Web-HTTPS) --------
     # Argv-Muster aus dem separaten (privaten) Produktions-Installer: echtes
     # End-Entity-Zertifikat (CA:FALSE + serverAuth-EKU), da strikte
     # TLS-Clients (rustls/webpki) sonst mit CaUsedAsEndEntity ablehnen.
+    # SAN mit Dev-Domain UND Bind-IP: Der Browser erreicht die Weboberfläche
+    # als https://<bind-ip>:3016 — nur mit IP-SAN aktiviert er den Secure-
+    # Context (Kamera/Screen-Share, Clipboard-API); server.js liest das
+    # Zertifikat fix aus /src/app/ssl/{cert.pem,key.pem}, der Dev-Override
+    # mountet certs/tls.* genau dorthin (read-only).
+    # Erzeugung in .secrets/: Das Zertifikat überlebt damit den Projekt-Wipe
+    # (und den Teardown-Default) — die einmalig akzeptierte Browser-Warnung
+    # und der OBS-Trust bleiben über Re-Deploys stabil.
     # no_log bewusst false: reines Dev-Zertifikat, Meldungen helfen bei
     # der Fehlersuche.
 
-    - name: Selbstsigniertes RTMPS-Dev-Zertifikat erzeugen (nur wenn absent)
+    - name: Selbstsigniertes Dev-TLS-Zertifikat erzeugen (nur wenn absent)
       ansible.builtin.command:
         argv:
           - openssl
@@ -378,23 +387,23 @@
           - -days
           - "3650"
           - -keyout
-          - "{{ mirotalkbro_rtp_dev_certs_dir }}/tls.key"
+          - "{{ mirotalkbro_rtp_dev_secrets_dir }}/tls.key"
           - -out
-          - "{{ mirotalkbro_rtp_dev_certs_dir }}/tls.crt"
+          - "{{ mirotalkbro_rtp_dev_secrets_dir }}/tls.crt"
           - -subj
           - "/CN={{ mirotalkbro_rtp_dev_domain }}"
           - -addext
-          - subjectAltName=DNS:{{ mirotalkbro_rtp_dev_domain }}
+          - subjectAltName=DNS:{{ mirotalkbro_rtp_dev_domain }},IP:{{ mirotalkbro_rtp_dev_bind_ip }}
           - -addext
           - basicConstraints=critical,CA:FALSE
           - -addext
           - keyUsage=critical,digitalSignature,keyEncipherment
           - -addext
           - extendedKeyUsage=serverAuth
-        creates: "{{ mirotalkbro_rtp_dev_certs_dir }}/tls.crt"
+        creates: "{{ mirotalkbro_rtp_dev_secrets_dir }}/tls.crt"
       no_log: false
 
-    - name: Zertifikatsdateien strikt auf 0600/root setzen
+    - name: Zertifikatsdateien in .secrets strikt auf 0600/root setzen
       ansible.builtin.file:
         path: "{{ item }}"
         state: file
@@ -402,8 +411,39 @@
         group: root
         mode: "0600"
       loop:
-        - "{{ mirotalkbro_rtp_dev_certs_dir }}/tls.crt"
-        - "{{ mirotalkbro_rtp_dev_certs_dir }}/tls.key"
+        - "{{ mirotalkbro_rtp_dev_secrets_dir }}/tls.crt"
+        - "{{ mirotalkbro_rtp_dev_secrets_dir }}/tls.key"
+
+    # --- Zertifikat nach certs/ synchronisieren ------------------------------
+    # mediamtx liest /etc/mediamtx/certs/tls.* (ro-Mount von certs/, läuft
+    # im Container als root) und braucht das Material wie bisher für den
+    # öffentlichen RTMPS-Ingest; der bro-Container liest dieselben Dateien
+    # über die Dev-Override-Mounts /src/app/ssl/{cert.pem,key.pem} — als
+    # uid/gid 1000 (node). Deshalb tls.key bewusst 0600 mit Eigentümer
+    # 1000:1000 statt root: 0600/root wäre für bro unlesbar (EACCES im
+    # fs.readFileSync beim App-Start), während root/mediamtx als root
+    # unabhängig vom Eigentümer liest. force: true synchronisiert bei jedem
+    # Lauf (überschreibt Alt-Certs früherer Läufe — keine Leichen) und setzt
+    # Modus/Eigentümer zuverlässig neu durch.
+
+    - name: Zertifikate nach certs/ kopieren (mediamtx + Dev-Web-TLS)
+      ansible.builtin.copy:
+        src: "{{ mirotalkbro_rtp_dev_secrets_dir }}/tls.{{ item.ext }}"
+        dest: "{{ mirotalkbro_rtp_dev_certs_dir }}/tls.{{ item.ext }}"
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        mode: "{{ item.mode }}"
+        remote_src: true
+        force: true
+      loop:
+        - ext: crt
+          owner: root
+          group: root
+          mode: "0644"
+        - ext: key
+          owner: "1000"
+          group: "1000"
+          mode: "0600"
 
     # --- keys.json: statischer Fallback bewusst LEER -------------------------
     # Die Dev-Instanz fährt auf Produktionsemantik (RTMP_REQUIRE_ROOM und
@@ -541,10 +581,16 @@
             timeout: 120
 
     # --- Bereitschafts- und Funktionsprüfung ----------------------------------
+    # wait_for bleibt bewusst reines TCP-Probing (oben): Es prüft nur, dass
+    # der Port lauscht. httpolyglot bedient HTTP und HTTPS auf demselben
+    # Port; der Web-Check läuft daher auf https:// — validate_certs bewusst
+    # false: selbstsigniertes Dev-Zertifikat, und 127.0.0.1 steht nicht im
+    # SAN (dort liegen nur Dev-Domain und Bind-IP).
 
     - name: BRO-Startseite abrufen (Status nur informativ)
       ansible.builtin.uri:
-        url: "http://127.0.0.1:{{ mirotalkbro_rtp_dev_port }}/"
+        url: "https://127.0.0.1:{{ mirotalkbro_rtp_dev_port }}/"
+        validate_certs: false
         status_code: [200, 301, 302]
       register: dev_bro_http_check
       failed_when: false
@@ -649,7 +695,7 @@
       ansible.builtin.debug:
         msg:
           - >-
-            Dev-Stack läuft (HTTP-Check:
+            Dev-Stack läuft (HTTPS-Check:
             Status {{ dev_bro_http_check.status | default('n/a') }}).
           - ""
           - >-
@@ -666,16 +712,22 @@
             Raum über die BRO-Weboberfläche neu anlegen/rotieren.
           - ""
           - >-
-            Zugriff (bewusst Plain-HTTP, nur Dev; über das private
-            Vagrant-Netz gebunden — vom Host und aus der VM erreichbar):
+            Zugriff (Dev-Web über HTTPS mit selbstsigniertem Dev-Zertifikat —
+            nötig für den Browser-Secure-Context: Kamera/Screen-Share und
+            Clipboard-API; gebunden über das private Vagrant-Netz, vom Host
+            und aus der VM erreichbar):
           - >-
             Viewer für den RTMP-Raum:
-            http://{{ mirotalkbro_rtp_dev_bind_ip }}:{{ mirotalkbro_rtp_dev_port
+            https://{{ mirotalkbro_rtp_dev_bind_ip }}:{{ mirotalkbro_rtp_dev_port
             }}/viewer?id={{ dev_room_id }}&name=viewer
           - >-
             Broadcast-Seite (Browser-Quelle, alternative Prüfung):
-            http://{{ mirotalkbro_rtp_dev_bind_ip }}:{{ mirotalkbro_rtp_dev_port
+            https://{{ mirotalkbro_rtp_dev_bind_ip }}:{{ mirotalkbro_rtp_dev_port
             }}/broadcast?id={{ dev_room_id }}&name=broadcaster
+          - >-
+            Hinweis HTTPS: Browser-Zertifikatswarnung einmalig akzeptieren
+            (Selfsigned, IP-SAN) — das Zertifikat überlebt Re-Deploys in
+            .secrets/, die Ausnahme bleibt also gültig.
           - ""
           - >-
             Test-Publish (RTMP-Endpunkt ebenfalls am privaten Vagrant-Netz —

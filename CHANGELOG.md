@@ -24,6 +24,10 @@
 - `RTMP_REQUIRE_ROOM` bindet den Ingest an registrierte RTMP-Räume.
 - Dev-Fast-Track mit rsync und `node --watch`, ohne Docker-CLI auf dem Host.
 - E2E-Deploy mit echtem Per-Room-Key-Flow.
+- Dev-Web über HTTPS mit selbstsigniertem Zertifikat (SAN für DNS und IP),
+  persistent in `.secrets/` und damit Wipe-sicher.
+- Copy-Buttons mit `execCommand`-Fallback, unabhängig vom Secure Context.
+- Runbook-Abschnitt zu Dev-TLS einschließlich optionalem OBS-Truststore-Import.
 - `sanitizeBody`-Redaktion in den globalen Request- und Fehler-Loggern.
 - RTMP-Karte nur im SFU-Modus.
 - Tests: 87 Root-Tests (`test/`, `npm run test:fork`) und 106 Adapter-Tests.
