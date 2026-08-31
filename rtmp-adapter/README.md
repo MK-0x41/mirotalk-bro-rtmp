@@ -32,7 +32,7 @@ previously loaded `keys.json` disappears or becomes unreadable.
 
 | Action            | Decision                                                        |
 | ----------------- | --------------------------------------------------------------- |
-| `publish`         | `rtmp`/`rtmps` protocol + path `live/<id>` + valid stream key; rate limited (10 failed attempts / 60s per IP → 429) |
+| `publish`         | `rtmp`/`rtmps` protocol + path `live/<id>` + valid stream key (dynamic BRO authorization first when `RTMP_DYNAMIC_AUTH=true`, see env table; otherwise static keys.json); rate limited (10 failed attempts / 60s per IP → 429) |
 | `read`            | Allowed **only** for the adapter's own IPs (its internal RTMP pull) |
 | `api`/`metrics`/`pprof` | Allowed **only** for the adapter's own IPs (control API access) |
 | `playback` / rest | 401 (v1 has no direct playback through MediaMTX)                |
@@ -63,6 +63,7 @@ comparison.
 | `MEDIAMTX_RTMP_SOURCE`  | `rtmp://mediamtx:19350`    | Internal **plain** RTMP base the adapter pulls from |
 | `ADAPTER_AUTH_PORT`     | `8080`                     | HTTP listen port for `/auth/publish` and `/healthz` |
 | `KEYS_FILE`             | `/app/config/keys.json`    | Stream key hashes (mounted read-only)              |
+| `RTMP_DYNAMIC_AUTH`     | `true`                     | Ask BRO (`POST /api/v1/external-ingest/authorize`, Bearer `BRO_INGEST_SECRET`) before the static keys.json check: `200 {allowed:true}` authorizes (no failure count), `{allowed:false}` **denies** (rate-limited); HTTP/network errors fall back to the static KeyStore. `false` = static keys.json only. Note: an explicit dynamic deny is final — static-keys.json deployments must set `false` (and `RTMP_REQUIRE_ROOM=false` on BRO) |
 | `RECONCILE_INTERVAL_MS` | `2000`                     | MediaMTX polling interval                          |
 | `MAX_CONCURRENT_INGESTS` | `4`                       | Cap on concurrent ingests; at the cap new ingests are deferred (error logged at most once per path per 60s), existing ingests unaffected |
 | `FFMPEG_PATH`           | `ffmpeg`                   | FFmpeg binary                                      |

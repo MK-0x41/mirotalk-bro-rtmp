@@ -67,6 +67,13 @@ function requiredHttpUrl(value, name) {
 }
 
 function loadConfig(env = process.env) {
+    // RTMP_DYNAMIC_AUTH: 'true'/'false', default 'true' (unset or empty).
+    const dynamicAuthRaw =
+        env.RTMP_DYNAMIC_AUTH === undefined || env.RTMP_DYNAMIC_AUTH === '' ? 'true' : env.RTMP_DYNAMIC_AUTH;
+    if (dynamicAuthRaw !== 'true' && dynamicAuthRaw !== 'false') {
+        throw new ConfigError('RTMP_DYNAMIC_AUTH must be true or false');
+    }
+
     const config = {
         broBaseUrl: env.BRO_BASE_URL || 'http://bro:3016',
         ingestSecret: env.BRO_INGEST_SECRET || '',
@@ -82,6 +89,7 @@ function loadConfig(env = process.env) {
         keyframeSeconds: Number.parseInt(env.KEYFRAME_SECONDS || '2', 10),
         videoPreset: env.VIDEO_PRESET || 'veryfast',
         logLevel: (env.LOG_LEVEL || 'info').toLowerCase(),
+        dynamicAuth: dynamicAuthRaw === 'true',
     };
 
     // BRO_INGEST_SECRET: hard requirement, fail-closed.

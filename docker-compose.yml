@@ -93,6 +93,12 @@ services:
             MEDIAMTX_RTMP_SOURCE: rtmp://mediamtx:19350
             ADAPTER_AUTH_PORT: '8080'
             KEYS_FILE: /app/config/keys.json
+            # Dynamische Stream-Key-Autorisierung über die BRO-Rooms-API
+            # (Default true). Statischer keys.json-Betrieb erfordert das Paar
+            # RTMP_REQUIRE_ROOM=false UND RTMP_DYNAMIC_AUTH=false in der .env
+            # (bro liest RTMP_* aus dem .env-Mount; der Adapter erhält die
+            # Variable hier explizit über die Compose-Interpolation).
+            RTMP_DYNAMIC_AUTH: '${RTMP_DYNAMIC_AUTH:-true}'
             RECONCILE_INTERVAL_MS: '${RECONCILE_INTERVAL_MS:-2000}'
             MAX_CONCURRENT_INGESTS: '${MAX_CONCURRENT_INGESTS:-4}'
             VIDEO_BITRATE: '${VIDEO_BITRATE:-2500k}'

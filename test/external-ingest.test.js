@@ -8,6 +8,8 @@
 
 const { describe, it, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const Module = require('module');
 
 const origLoad = Module._load;
@@ -357,5 +359,161 @@ describe('createExternalIngestRouter', () => {
         assert.equal(text.includes('wrong-secret-1234567890'), false);
         assert.equal(text.includes(DENY_A), false);
         assert.equal(text.includes('Bearer '), false);
+    });
+
+    it('POST /authorize returns 200 {allowed:true} when the handler allows', async () => {
+        const router = enabledRouter({
+            authorizeIngest: async ({ broadcastId, token }) => {
+                assert.equal(broadcastId, 'auth-room');
+                assert.equal(token, 'fake-stream-key-for-authorize');
+                return { allowed: true };
+            },
+        });
+        const res = await runRoute(
+            router,
+            'POST /authorize',
+            mkReq(`Bearer ${SECRET}`, {
+                path: '/authorize',
+                body: { broadcastId: 'auth-room', token: 'fake-stream-key-for-authorize', extra: 'ignored' },
+            })
+        );
+        assert.equal(res.statusCode, 200);
+        assert.deepEqual(res.body, { allowed: true });
+    });
+
+    it('POST /authorize returns 200 {allowed:false} when the handler denies', async () => {
+        const router = enabledRouter({
+            authorizeIngest: async () => ({ allowed: false }),
+        });
+        const res = await runRoute(
+            router,
+            'POST /authorize',
+            mkReq(`Bearer ${SECRET}`, { path: '/authorize', body: { broadcastId: 'auth-room', token: 'nope' } })
+        );
+        assert.equal(res.statusCode, 200);
+        assert.deepEqual(res.body, { allowed: false });
+    });
+
+    it('POST /authorize fail-closes to 200 {allowed:false} when the handler throws', async () => {
+        const router = enabledRouter({
+            authorizeIngest: async () => {
+                throw new Error('registry exploded with internal detail');
+            },
+        });
+        const res = await runRoute(
+            router,
+            'POST /authorize',
+            mkReq(`Bearer ${SECRET}`, { path: '/authorize', body: { broadcastId: 'auth-room', token: 'fake-key' } })
+        );
+        assert.equal(res.statusCode, 200);
+        assert.deepEqual(res.body, { allowed: false });
+        assert.equal(JSON.stringify(res.body).includes('internal detail'), false);
+    });
+
+    it('POST /authorize fail-closes to 200 {allowed:false} when no handler is wired', async () => {
+        const res = await runRoute(
+            enabledRouter(),
+            'POST /authorize',
+            mkReq(`Bearer ${SECRET}`, { path: '/authorize', body: { broadcastId: 'auth-room', token: 'fake-key' } })
+        );
+        assert.equal(res.statusCode, 200);
+        assert.deepEqual(res.body, { allowed: false });
+    });
+
+    it('POST /authorize returns 400 for invalid body shapes', async () => {
+        const router = enabledRouter({ authorizeIngest: async () => ({ allowed: true }) });
+        const noBody = await runRoute(router, 'POST /authorize', mkReq(`Bearer ${SECRET}`, { path: '/authorize', body: undefined }));
+        assert.equal(noBody.statusCode, 400);
+        assert.deepEqual(noBody.body, { error: 'JSON body required' });
+
+        const arrayBody = await runRoute(router, 'POST /authorize', mkReq(`Bearer ${SECRET}`, { path: '/authorize', body: [] }));
+        assert.equal(arrayBody.statusCode, 400);
+
+        const badId = await runRoute(
+            router,
+            'POST /authorize',
+            mkReq(`Bearer ${SECRET}`, { path: '/authorize', body: { broadcastId: '../etc/passwd', token: 'x' } })
+        );
+        assert.equal(badId.statusCode, 400);
+        assert.deepEqual(badId.body, { error: 'Invalid broadcastId' });
+
+        const missingToken = await runRoute(
+            router,
+            'POST /authorize',
+            mkReq(`Bearer ${SECRET}`, { path: '/authorize', body: { broadcastId: 'auth-room' } })
+        );
+        assert.equal(missingToken.statusCode, 400);
+        assert.deepEqual(missingToken.body, { error: 'Invalid token' });
+
+        const emptyToken = await runRoute(
+            router,
+            'POST /authorize',
+            mkReq(`Bearer ${SECRET}`, { path: '/authorize', body: { broadcastId: 'auth-room', token: '' } })
+        );
+        assert.equal(emptyToken.statusCode, 400);
+
+        const overlong = await runRoute(
+            router,
+            'POST /authorize',
+            mkReq(`Bearer ${SECRET}`, { path: '/authorize', body: { broadcastId: 'auth-room', token: 'x'.repeat(4097) } })
+        );
+        assert.equal(overlong.statusCode, 400);
+        assert.deepEqual(overlong.body, { error: 'Invalid token' });
+    });
+
+    it('POST /authorize returns 401 for a wrong bearer and 404 when disabled', async () => {
+        const enabled = await runRoute(
+            enabledRouter({ authorizeIngest: async () => ({ allowed: true }) }),
+            'POST /authorize',
+            mkReq('Bearer wrong-secret-1234567890', { path: '/authorize', body: { broadcastId: 'auth-room', token: 'x' } })
+        );
+        assert.equal(enabled.statusCode, 401);
+        assert.deepEqual(enabled.body, { error: 'Unauthorized' });
+
+        const disabled = createExternalIngestRouter({
+            config: { externalIngestEnabled: false, externalIngestSecret: SECRET },
+            handlers: { authorizeIngest: async () => ({ allowed: true }) },
+        });
+        const res = await runRoute(
+            disabled,
+            'POST /authorize',
+            mkReq(`Bearer ${SECRET}`, { path: '/authorize', body: { broadcastId: 'auth-room', token: 'x' } })
+        );
+        assert.equal(res.statusCode, 404);
+        assert.deepEqual(res.body, { error: 'Not found' });
+    });
+
+    it('does not write authorize tokens into captured log output', async () => {
+        const token = 'fake-authorize-token-must-not-leak';
+        const router = enabledRouter({
+            authorizeIngest: async () => {
+                throw new Error('boom while authorizing');
+            },
+        });
+        await runRoute(
+            router,
+            'POST /authorize',
+            mkReq(`Bearer ${SECRET}`, { path: '/authorize', body: { broadcastId: 'auth-room', token } })
+        );
+        const text = loggedText();
+        assert.equal(text.includes(token), false);
+        assert.equal(text.includes(SECRET), false);
+        assert.equal(text.includes('Bearer '), false);
+    });
+});
+
+describe('server.js authorizeIngest wiring (structural)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../app/server.js'), 'utf8');
+
+    it('injects authorizeIngest against the rooms registry (not loadable without runtime deps)', () => {
+        // The router accepts an injected authorizeIngest handler; server.js is not
+        // unit-loadable (httpolyglot/sentry/mediasoup). Guard the production wiring shape.
+        assert.match(source, /authorizeIngest:\s*\(\{\s*broadcastId,\s*token\s*\}\)\s*=>/);
+        assert.match(source, /roomRegistry\.getRoom\(broadcastId\)/);
+        assert.match(source, /roomRegistry\.validateRtmpKey\(broadcastId,\s*token\)/);
+        assert.match(source, /roomRegistry\.touch\(broadcastId\)/);
+        assert.match(source, /requireRoom:\s*rtmpRequireRoom/);
+        assert.match(source, /roomRegistry:\s*roomRegistry/);
+        assert.match(source, /sourceType === 'rtmp'/);
     });
 });

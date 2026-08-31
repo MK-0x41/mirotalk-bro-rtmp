@@ -131,6 +131,7 @@ Module._load = function (request, parent, isMain) {
 };
 
 const handler = require('../app/mediasoup-handler');
+const { createRoomRegistry } = require('../app/rooms');
 
 function makeIo() {
     return {
@@ -181,6 +182,13 @@ function makeCloseable() {
     };
 }
 
+/** Production wiring: createExternalIngest receives { roomRegistry } from server.js. */
+function rtmpRoom(name = 'RTMP Test') {
+    const roomRegistry = createRoomRegistry();
+    const room = roomRegistry.createRoom({ name, sourceType: 'rtmp' }).room;
+    return { roomRegistry, room, id: room.id, opts: { roomRegistry } };
+}
+
 describe('mediasoup external ingest', () => {
     const io = makeIo();
 
@@ -196,7 +204,8 @@ describe('mediasoup external ingest', () => {
     });
 
     it('passes portRange min-max on PlainTransport listenInfo', async () => {
-        await handler.createExternalIngest('range-default', io);
+        const { id, opts } = rtmpRoom('range-default');
+        await handler.createExternalIngest(id, io, opts);
         assert.equal(calls.transports.length, 2);
         const expected = expectedListenInfo(41000, 41099);
         for (const transport of calls.transports) {
@@ -213,44 +222,49 @@ describe('mediasoup external ingest', () => {
     });
 
     it('passes a custom options portRange through to listenInfo', async () => {
-        await handler.createExternalIngest('range-custom', io, { portMin: 41500, portMax: 41510 });
-        const opts = calls.transports[calls.transports.length - 1].options;
-        assert.equal(Array.isArray(opts.listenInfo), false);
-        assert.equal(opts.listenInfo.portRange.min, 41500);
-        assert.equal(opts.listenInfo.portRange.max, 41510);
-        assert.equal(opts.rtcpListenInfo.portRange.min, 41500);
-        assert.equal(opts.rtcpListenInfo.portRange.max, 41510);
-        assert.equal(typeof opts.listenInfo.portRange.min, 'number');
-        assert.equal(typeof opts.rtcpListenInfo.portRange.max, 'number');
-        assert.deepEqual(opts.listenInfo, expectedListenInfo(41500, 41510));
-        assert.deepEqual(opts.rtcpListenInfo, expectedListenInfo(41500, 41510));
+        const { id, opts } = rtmpRoom('range-custom');
+        await handler.createExternalIngest(id, io, { ...opts, portMin: 41500, portMax: 41510 });
+        const transportOpts = calls.transports[calls.transports.length - 1].options;
+        assert.equal(Array.isArray(transportOpts.listenInfo), false);
+        assert.equal(transportOpts.listenInfo.portRange.min, 41500);
+        assert.equal(transportOpts.listenInfo.portRange.max, 41510);
+        assert.equal(transportOpts.rtcpListenInfo.portRange.min, 41500);
+        assert.equal(transportOpts.rtcpListenInfo.portRange.max, 41510);
+        assert.equal(typeof transportOpts.listenInfo.portRange.min, 'number');
+        assert.equal(typeof transportOpts.rtcpListenInfo.portRange.max, 'number');
+        assert.deepEqual(transportOpts.listenInfo, expectedListenInfo(41500, 41510));
+        assert.deepEqual(transportOpts.rtcpListenInfo, expectedListenInfo(41500, 41510));
     });
 
     it('throws on RTC range overlap before creating transports', async () => {
+        const { id, opts } = rtmpRoom('overlap-room');
         await assert.rejects(
-            handler.createExternalIngest('overlap-room', io, { portMin: 20000, portMax: 20050 }),
+            handler.createExternalIngest(id, io, { ...opts, portMin: 20000, portMax: 20050 }),
             /overlaps the WebRTC RTC port range/
         );
         assert.equal(calls.transports.length, 0);
     });
 
     it('throws on an inverted or privileged port range before creating transports', async () => {
+        const inverted = rtmpRoom('inverted-room');
         await assert.rejects(
-            handler.createExternalIngest('inverted-room', io, { portMin: 41100, portMax: 41050 }),
+            handler.createExternalIngest(inverted.id, io, { ...inverted.opts, portMin: 41100, portMax: 41050 }),
             /Invalid external ingest port range/
         );
+        const low = rtmpRoom('low-room');
         await assert.rejects(
-            handler.createExternalIngest('low-room', io, { portMin: 80, portMax: 90 }),
+            handler.createExternalIngest(low.id, io, { ...low.opts, portMin: 80, portMax: 90 }),
             /Invalid external ingest port range/
         );
         assert.equal(calls.transports.length, 0);
     });
 
     it('returns 409 when a browser broadcaster or non-rtmp producer is present', async () => {
-        const mixed = await handler.getOrCreateRoom('mixed-room');
+        const { id, opts } = rtmpRoom('mixed-room');
+        const mixed = await handler.getOrCreateRoom(id);
         mixed.broadcasterSocketId = 'sock-broad-1';
         await assert.rejects(
-            handler.createExternalIngest('mixed-room', io),
+            handler.createExternalIngest(id, io, opts),
             (err) => err.status === 409
         );
         assert.equal(calls.transports.length, 0);
@@ -258,37 +272,39 @@ describe('mediasoup external ingest', () => {
         mixed.broadcasterSocketId = null;
         mixed.producers.set('browser-1', { id: 'browser-1', appData: { source: 'browser' } });
         await assert.rejects(
-            handler.createExternalIngest('mixed-room', io),
+            handler.createExternalIngest(id, io, opts),
             (err) => err.status === 409
         );
         assert.equal(calls.transports.length, 0);
     });
 
     it('rejects sfu-createBroadcasterTransport when external ingest is active', async () => {
-        await handler.createExternalIngest('exclusive-bc', io);
+        const { id, opts } = rtmpRoom('exclusive-bc');
+        await handler.createExternalIngest(id, io, opts);
         const socket = makeSocket('sock-try-bc');
         const broadcasters = {};
         const viewers = {};
         handler.handleSfuConnection(socket, io, broadcasters, viewers);
 
         let callbackPayload;
-        await socket.emit('sfu-createBroadcasterTransport', 'exclusive-bc', (payload) => {
+        await socket.emit('sfu-createBroadcasterTransport', id, (payload) => {
             callbackPayload = payload;
         });
 
         assert.deepEqual(callbackPayload, {
             error: 'Room already has an external ingest, browser broadcaster is exclusive',
         });
-        const room = handler.getRoom('exclusive-bc');
+        const room = handler.getRoom(id);
         assert.equal(room.externalIngest.active, true);
         assert.equal(room.broadcasterSocketId, null);
-        assert.equal(broadcasters['exclusive-bc'], undefined);
+        assert.equal(broadcasters[id], undefined);
     });
 
     it('is idempotent and returns the start contract shape', async () => {
-        const info1 = await handler.createExternalIngest('rtmp-room', io);
+        const { id, opts } = rtmpRoom('rtmp-room');
+        const info1 = await handler.createExternalIngest(id, io, opts);
         assert.deepEqual(Object.keys(info1).sort(), ['audio', 'broadcastId', 'video']);
-        assert.equal(info1.broadcastId, 'rtmp-room');
+        assert.equal(info1.broadcastId, id);
         for (const kind of ['video', 'audio']) {
             assert.deepEqual(Object.keys(info1[kind]).sort(), ['payloadType', 'port', 'profile', 'rtcpPort', 'ssrc']);
             assert.equal(typeof info1[kind].port, 'number');
@@ -303,49 +319,53 @@ describe('mediasoup external ingest', () => {
 
         const transportsBefore = calls.transports.length;
         const producesBefore = calls.produces.length;
-        const info2 = await handler.createExternalIngest('rtmp-room', io);
+        const info2 = await handler.createExternalIngest(id, io, opts);
         assert.equal(calls.transports.length, transportsBefore);
         assert.equal(calls.produces.length, producesBefore);
         assert.deepEqual(info2, info1);
     });
 
     it('stopExternalIngest closes producers and transports and is a no-op when absent', async () => {
-        await handler.createExternalIngest('stop-room', io);
-        const ingest = handler.getRoom('stop-room').externalIngest;
-        await handler.stopExternalIngest('stop-room');
+        const { id, opts } = rtmpRoom('stop-room');
+        await handler.createExternalIngest(id, io, opts);
+        const ingest = handler.getRoom(id).externalIngest;
+        await handler.stopExternalIngest(id);
         assert.equal(ingest.videoProducer.closed, true);
         assert.equal(ingest.audioProducer.closed, true);
         assert.equal(ingest.videoTransport.closed, true);
         assert.equal(ingest.audioTransport.closed, true);
-        assert.equal(handler.getRoom('stop-room'), null);
+        assert.equal(handler.getRoom(id), null);
 
         await handler.stopExternalIngest('does-not-exist');
     });
 
     it('deletes an empty hadExternalIngest room after the last viewer leaves', async () => {
-        await handler.createExternalIngest('leak-room', io);
-        handler.getRoom('leak-room').viewers.set('sock-lv', { username: 'lv' });
-        const viewers = { 'sock-lv': { broadcastID: 'leak-room', username: 'lv' } };
-        await handler.stopExternalIngest('leak-room');
-        assert.ok(handler.getRoom('leak-room'));
+        const { id, opts } = rtmpRoom('leak-room');
+        await handler.createExternalIngest(id, io, opts);
+        handler.getRoom(id).viewers.set('sock-lv', { username: 'lv' });
+        const viewers = { 'sock-lv': { broadcastID: id, username: 'lv' } };
+        await handler.stopExternalIngest(id);
+        assert.ok(handler.getRoom(id));
         handler.handleSfuDisconnect({ id: 'sock-lv' }, {}, viewers, io);
-        assert.equal(handler.getRoom('leak-room'), null);
+        assert.equal(handler.getRoom(id), null);
     });
 
     it('does not delete a room while externalIngest is active', async () => {
-        await handler.createExternalIngest('keep-room', io);
-        handler.getRoom('keep-room').viewers.set('sock-kv', { username: 'kv' });
-        const viewers = { 'sock-kv': { broadcastID: 'keep-room', username: 'kv' } };
+        const { id, opts } = rtmpRoom('keep-room');
+        await handler.createExternalIngest(id, io, opts);
+        handler.getRoom(id).viewers.set('sock-kv', { username: 'kv' });
+        const viewers = { 'sock-kv': { broadcastID: id, username: 'kv' } };
         handler.handleSfuDisconnect({ id: 'sock-kv' }, {}, viewers, io);
-        assert.ok(handler.getRoom('keep-room'));
-        assert.equal(handler.getRoom('keep-room').externalIngest.active, true);
+        assert.ok(handler.getRoom(id));
+        assert.equal(handler.getRoom(id).externalIngest.active, true);
     });
 
     it('clears stale broadcaster state after grace when external ingest is active', async (t) => {
         t.mock.timers.enable({ apis: ['setTimeout'] });
 
-        await handler.createExternalIngest('grace-room', io);
-        const room = handler.getRoom('grace-room');
+        const { id, opts } = rtmpRoom('grace-room');
+        await handler.createExternalIngest(id, io, opts);
+        const room = handler.getRoom(id);
         const transport = makeCloseable();
         const recvTransport = makeCloseable();
         const sendTransport = makeCloseable();
@@ -354,8 +374,8 @@ describe('mediasoup external ingest', () => {
         room.viewers.set('sock-bc', { username: 'bc', recvTransport, sendTransport });
         room.viewers.set('sock-viewer', { username: 'v' });
 
-        const broadcasters = { 'grace-room': 'sock-bc' };
-        const viewers = { 'sock-bc': { broadcastID: 'grace-room', username: 'bc' } };
+        const broadcasters = { [id]: 'sock-bc' };
+        const viewers = { 'sock-bc': { broadcastID: id, username: 'bc' } };
 
         const handled = handler.handleSfuDisconnect({ id: 'sock-bc' }, broadcasters, viewers, io);
         assert.equal(handled, true);
@@ -371,9 +391,9 @@ describe('mediasoup external ingest', () => {
         assert.equal(recvTransport.closed, true);
         assert.equal(sendTransport.closed, true);
         assert.equal(room.viewers.has('sock-viewer'), true);
-        assert.ok(handler.getRoom('grace-room'));
-        assert.equal(handler.getRoom('grace-room').externalIngest.active, true);
-        assert.equal(broadcasters['grace-room'], undefined);
+        assert.ok(handler.getRoom(id));
+        assert.equal(handler.getRoom(id).externalIngest.active, true);
+        assert.equal(broadcasters[id], undefined);
         assert.equal(viewers['sock-bc'], undefined);
     });
 
@@ -388,7 +408,8 @@ describe('mediasoup external ingest', () => {
 
     it('getExternalIngestStatus reports active ingest ids and producer ids', async () => {
         assert.deepEqual(handler.getExternalIngestStatus(), []);
-        const info = await handler.createExternalIngest('status-room', io);
+        const { id, opts } = rtmpRoom('status-room');
+        const info = await handler.createExternalIngest(id, io, opts);
         const status = handler.getExternalIngestStatus();
         assert.equal(status.length, 1);
         assert.deepEqual(Object.keys(status[0]).sort(), [
@@ -401,5 +422,40 @@ describe('mediasoup external ingest', () => {
         assert.equal(typeof status[0].startedAt, 'string');
         assert.equal(typeof status[0].videoProducerId, 'string');
         assert.equal(typeof status[0].audioProducerId, 'string');
+    });
+
+    it('returns 404 when no registry entry exists, before creating transports', async () => {
+        const roomRegistry = createRoomRegistry();
+        await assert.rejects(
+            handler.createExternalIngest('missing-room', io, { roomRegistry }),
+            (err) => err.status === 404 && err.message === 'Room not found or not an RTMP room'
+        );
+        assert.equal(calls.transports.length, 0);
+        assert.equal(handler.getRoom('missing-room'), null);
+
+        await assert.rejects(
+            handler.createExternalIngest('no-registry', io),
+            (err) => err.status === 404 && err.message === 'Room not found or not an RTMP room'
+        );
+        assert.equal(handler.getRoom('no-registry'), null);
+    });
+
+    it('returns 404 when the room exists but sourceType is not rtmp', async () => {
+        const roomRegistry = createRoomRegistry();
+        const camera = roomRegistry.createRoom({ name: 'Camera Room', sourceType: 'camera' }).room;
+        await assert.rejects(
+            handler.createExternalIngest(camera.id, io, { roomRegistry }),
+            (err) => err.status === 404 && err.message === 'Room not found or not an RTMP room'
+        );
+        assert.equal(calls.transports.length, 0);
+        assert.equal(handler.getRoom(camera.id), null);
+    });
+
+    it('requireRoom:false creates ingest without a registry (static/no-registry mode)', async () => {
+        const info = await handler.createExternalIngest('static-fallback', io, { requireRoom: false });
+        assert.equal(info.broadcastId, 'static-fallback');
+        assert.equal(calls.transports.length, 2);
+        assert.ok(handler.getRoom('static-fallback'));
+        assert.equal(handler.getRoom('static-fallback').externalIngest.active, true);
     });
 });

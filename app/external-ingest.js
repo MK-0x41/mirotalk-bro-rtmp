@@ -21,6 +21,8 @@ const log = new logs('external-ingest');
 // broadcastId charset, aligned with the ids used by /broadcast and /viewer
 const BROADCAST_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const MIN_SECRET_LENGTH = 16;
+// Stream-Key-Längenlimit für /authorize (Deckelung, Spiegelung des Adapters)
+const MAX_AUTHORIZE_TOKEN_LENGTH = 4096;
 
 // Well-known example values from templates and documentation. These must never
 // be accepted as a real secret (configured or presented), even though they are
@@ -62,7 +64,7 @@ function isAuthorizedRequest(req, secret) {
  *
  * @param {object} options
  * @param {object} options.config - { externalIngestEnabled: boolean, externalIngestSecret: string }
- * @param {object} options.handlers - { createExternalIngest, stopExternalIngest, getExternalIngestStatus }
+ * @param {object} options.handlers - { createExternalIngest, stopExternalIngest, getExternalIngestStatus, authorizeIngest }
  * @returns {express.Router}
  */
 function createExternalIngestRouter({ config, handlers }) {
@@ -125,6 +127,12 @@ function createExternalIngestRouter({ config, handlers }) {
                 log.warn('External ingest start rejected: room has a browser source', { broadcastId });
                 return res.status(409).json({ error: 'Room already has a browser broadcaster' });
             }
+            // Fork: Raum-Pflicht (RTMP_REQUIRE_ROOM) — nicht registrierte
+            // Räume sind 404, bevor Transporte entstehen
+            if (error && error.status === 404) {
+                log.warn('External ingest start rejected: no registered RTMP room', { broadcastId });
+                return res.status(404).json({ error: 'Room not found or not an RTMP room' });
+            }
             // Safe message only, no stack traces or internals
             log.error('External ingest start failed', { broadcastId, error: error.message });
             return res.status(502).json({ error: 'Failed to start external ingest' });
@@ -141,6 +149,41 @@ function createExternalIngestRouter({ config, handlers }) {
         } catch (error) {
             log.error('External ingest stop failed', { broadcastId, error: error.message });
             return res.status(502).json({ error: 'Failed to stop external ingest' });
+        }
+    });
+
+    /**
+     * Dynamische Stream-Key-Autorisierung (Fork): der rtmp-adapter fragt hier
+     * nach, ob broadcastId+token einen registrierten RTMP-Raum freischalten.
+     * Die Antwort ist IMMER 200 {allowed:true|false} — auch bei internen
+     * Fehlern (fail-closed). Ein 4xx/5xx wäre ein zusätzlicher Oracle jenseits
+     * des Booleans; nur ungültige Request-Shapes erhalten 400.
+     */
+    router.post('/authorize', async (req, res) => {
+        const body = req.body;
+        if (!body || typeof body !== 'object' || Array.isArray(body)) {
+            return res.status(400).json({ error: 'JSON body required' });
+        }
+        const broadcastId = body.broadcastId;
+        const token = body.token;
+        if (!isValidBroadcastId(broadcastId)) {
+            return res.status(400).json({ error: 'Invalid broadcastId' });
+        }
+        if (typeof token !== 'string' || token.length === 0 || token.length > MAX_AUTHORIZE_TOKEN_LENGTH) {
+            return res.status(400).json({ error: 'Invalid token' });
+        }
+        const authorize = handlers.authorizeIngest;
+        if (typeof authorize !== 'function') {
+            log.error('External ingest authorize unavailable: no handler wired');
+            return res.status(200).json({ allowed: false });
+        }
+        try {
+            const result = await authorize({ broadcastId, token });
+            return res.status(200).json({ allowed: Boolean(result && result.allowed === true) });
+        } catch (error) {
+            // Never log the token or reveal which check failed
+            log.error('External ingest authorize failed', { broadcastId, error: error.message });
+            return res.status(200).json({ allowed: false });
         }
     });
 
@@ -165,4 +208,5 @@ module.exports = {
     getBearerToken,
     BROADCAST_ID_PATTERN,
     EXAMPLE_SECRET_DENYLIST,
+    MAX_AUTHORIZE_TOKEN_LENGTH,
 };

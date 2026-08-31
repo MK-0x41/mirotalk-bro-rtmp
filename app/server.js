@@ -10,8 +10,9 @@
  * @author  Miroslav Pejic - miroslav.pejic.85@gmail.com
  * @version 1.3.77
  *
- * NOTE (fork): the JSON body error logger below redacts sensitive headers
- * (Authorization, Cookie, ...) before logging (Sicherheits-Fix im Fork).
+ * NOTE (fork): the global request/error loggers below redact sensitive
+ * headers (Authorization, Cookie, ...) and sensitive body fields
+ * (token, secret, key, ...) before logging (Sicherheits-Fix im Fork).
  */
 
 require('dotenv').config();
@@ -263,7 +264,7 @@ app.use(apiBasePath + '/docs', swaggerUi.serve, swaggerUi.setup(swaggerDocument)
 // Logs requests
 app.use((req, res, next) => {
     log.debug('New request:', {
-        body: req.body,
+        body: sanitizeBody(req.body),
         method: req.method,
         path: req.originalUrl,
     });
@@ -282,11 +283,29 @@ function sanitizeHeaders(headers) {
     return safeHeaders;
 }
 
+// Sicherheits-Fix im Fork: Request-Bodies vor dem Loggen redigieren. Die
+// globalen Request-/Fehler-Logger liefen zuvor /authorize-Tokens im Klartext
+// mit (z. B. `token` in POST /api/v1/external-ingest/authorize). Objekte
+// werden flach kopiert und Werte sensibler Schlüssel (token, secret,
+// password, streamkey, key, authorization — case-insensitiv) durch
+// '[REDACTED]' ersetzt; alles andere wird nur als Typname geloggt, damit
+// niemals Nutzdaten durchrutschen (bewusst über-redigierend, fail-safe).
+const SENSITIVE_BODY_KEYS_RE = /token|secret|password|streamkey|key|authorization/i;
+
+function sanitizeBody(body) {
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return typeof body;
+    const safeBody = { ...body };
+    for (const name of Object.keys(safeBody)) {
+        if (SENSITIVE_BODY_KEYS_RE.test(name)) safeBody[name] = '[REDACTED]';
+    }
+    return safeBody;
+}
+
 app.use((err, req, res, next) => {
     if (err instanceof SyntaxError || err.status === 400 || 'body' in err) {
         log.error('Request Error', {
             header: sanitizeHeaders(req.headers),
-            body: req.body,
+            body: sanitizeBody(req.body),
             error: err.message,
         });
         return res.status(400).send({ status: 404, message: err.message }); // Bad request
@@ -449,6 +468,18 @@ const externalIngestSecret = process.env.EXTERNAL_INGEST_SECRET || '';
 // MEDIASOUP_RTC_MIN_PORT/MEDIASOUP_RTC_MAX_PORT (validated in mediasoup-handler).
 const externalIngestPortMin = parseInt(process.env.EXTERNAL_INGEST_PORT_MIN, 10) || 41000;
 const externalIngestPortMax = parseInt(process.env.EXTERNAL_INGEST_PORT_MAX, 10) || 41099;
+
+// Rooms-Registry + admin-geschützte Rooms-API (Fork): RTMP-Zufuhr läuft über
+// registrierte Räume mit rotierbaren Stream-Keys. Klartext-Keys werden nur bei
+// Erzeugung/Rotation ausgeliefert; die Registry speichert nur sha256-Hashes.
+const { createRoomRegistry } = require('./rooms');
+const { createRoomsRouter } = require('./rooms-routes');
+
+const rtmpMaxRooms = parseInt(process.env.RTMP_MAX_ROOMS, 10) || 50;
+const rtmpIngestUrl = process.env.RTMP_INGEST_URL || '';
+const rtmpRequireRoom = getEnvBoolean(process.env.RTMP_REQUIRE_ROOM, true);
+const roomRegistry = createRoomRegistry({ maxRtmpRooms: rtmpMaxRooms });
+
 if (externalIngestEnabled && isSFU) {
     const { createExternalIngestRouter } = require('./external-ingest');
     app.use(
@@ -460,19 +491,51 @@ if (externalIngestEnabled && isSFU) {
                     sfuHandler.createExternalIngest(broadcastId, io, {
                         portMin: externalIngestPortMin,
                         portMax: externalIngestPortMax,
+                        requireRoom: rtmpRequireRoom,
+                        roomRegistry: roomRegistry,
                     }),
                 stopExternalIngest: (broadcastId) => sfuHandler.stopExternalIngest(broadcastId),
                 getExternalIngestStatus: () => sfuHandler.getExternalIngestStatus(),
+                // Dynamische Stream-Key-Autorisierung: Raum muss registriert,
+                // RTMP-typisiert und der Key gültig sein (Hash-Vergleich).
+                // Timing-Orakel vermeiden: validateRtmpKey läuft IMMER — auch
+                // bei fehlendem/nicht-rtmp Raum gleicht es uniform gegen den
+                // Dummy-Hash (Muster aus app/rooms.js) —, erst danach werden
+                // die Bedingungen zu einem boolean kombiniert (kein &&
+                // Short-Circuit vor dem Vergleich).
+                authorizeIngest: ({ broadcastId, token }) => {
+                    const room = roomRegistry.getRoom(broadcastId);
+                    const keyValid = roomRegistry.validateRtmpKey(broadcastId, token);
+                    const allowed = Boolean(room && room.sourceType === 'rtmp' && keyValid);
+                    if (allowed) roomRegistry.touch(broadcastId);
+                    return { allowed };
+                },
             },
         })
     );
     log.info('External ingest API enabled', {
         path: apiBasePath + '/external-ingest',
         portRange: `${externalIngestPortMin}-${externalIngestPortMax}`,
+        requireRoom: rtmpRequireRoom,
     });
 } else if (externalIngestEnabled) {
     log.warn('External ingest API requires BROADCASTING=sfu, not mounted');
 }
+
+// Rooms API (Fork): öffentlich erreichbar, ausschließlich durch den
+// ADMIN_TOKEN geschützt (Bearer). Ohne konfiguriertes Token bewusst
+// unbenutzbar (503) — die API vergibt Stream-Keys.
+app.use(
+    apiBasePath + '/rooms',
+    createRoomsRouter({
+        config: { adminToken: process.env.ADMIN_TOKEN || '', rtmpIngestUrl },
+        registry: roomRegistry,
+        isValidAdminToken,
+        getIngestStatus: isSFU ? () => sfuHandler.getExternalIngestStatus() : () => [],
+        stopExternalIngest: isSFU ? (id) => sfuHandler.stopExternalIngest(id) : async () => {},
+    })
+);
+log.info('Rooms API enabled', { path: apiBasePath + '/rooms', maxRtmpRooms: rtmpMaxRooms });
 
 app.use((req, res) => {
     return notFound(res);
@@ -723,3 +786,8 @@ server.on('clientError', (err, socket) => {
         socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
     }
 });
+
+// Export für Tests: die Redaktions-Helfer sind rein und side-effect-frei.
+// (server.js startet beim Require den Server; Tests verwenden i. d. R. den
+// Struktur-Guard oder führen die Helfer isoliert aus.)
+module.exports = { sanitizeHeaders, sanitizeBody };

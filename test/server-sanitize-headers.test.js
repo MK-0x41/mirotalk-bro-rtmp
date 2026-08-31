@@ -130,3 +130,106 @@ describe('server.js startup log secret masking (structural guard)', () => {
         );
     });
 });
+
+/**
+ * Structural + extracted-function guard for sanitizeBody.
+ *
+ * server.js starts the HTTP server on require (httpolyglot/sentry/mediasoup),
+ * so the helper is extracted from source rather than loaded as a module.
+ * The extraction must match the production function body; log-site wiring
+ * stays a structural assertion like sanitizeHeaders.
+ */
+describe('server.js sanitizeBody (structural + extracted helper)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../app/server.js'), 'utf8');
+
+    function loadSanitizeBody() {
+        const reMatch = source.match(/const SENSITIVE_BODY_KEYS_RE = (\/token\|secret\|password\|streamkey\|key\|authorization\/i);/);
+        assert.ok(reMatch, 'expected SENSITIVE_BODY_KEYS_RE');
+        const fnMatch = source.match(/function sanitizeBody\(body\) \{[\s\S]*?return safeBody;\n\}/);
+        assert.ok(fnMatch, 'expected sanitizeBody function');
+        return new Function(`${reMatch[0]}\n${fnMatch[0]}\nreturn sanitizeBody;`)();
+    }
+
+    it('defines SENSITIVE_BODY_KEYS_RE, copies the object, and exports sanitizeBody', () => {
+        assert.match(source, /const SENSITIVE_BODY_KEYS_RE = \/token\|secret\|password\|streamkey\|key\|authorization\/i/);
+        assert.match(source, /function sanitizeBody\(body\)/);
+        assert.match(source, /const safeBody = \{ \.\.\.body \}/);
+        assert.match(source, /safeBody\[name\] = '\[REDACTED\]'/);
+        assert.match(source, /return typeof body/);
+        assert.match(source, /module\.exports = \{ sanitizeHeaders, sanitizeBody \}/);
+        assert.match(source, /body: sanitizeBody\(req\.body\)/);
+    });
+
+    it('redacts token/TOKEN/mySecret/password/streamKey/apiKey/authorization without mutating the original', () => {
+        const sanitizeBody = loadSanitizeBody();
+        const original = {
+            token: 'plain-token',
+            TOKEN: 'UPPER-TOKEN',
+            mySecret: 's3cret',
+            password: 'hunter2',
+            streamKey: 'sk-live',
+            apiKey: 'ak-live',
+            authorization: 'Bearer abc',
+            name: 'studio',
+            sourceType: 'rtmp',
+        };
+        const snapshot = { ...original };
+        const redacted = sanitizeBody(original);
+
+        assert.equal(redacted.token, '[REDACTED]');
+        assert.equal(redacted.TOKEN, '[REDACTED]');
+        assert.equal(redacted.mySecret, '[REDACTED]');
+        assert.equal(redacted.password, '[REDACTED]');
+        assert.equal(redacted.streamKey, '[REDACTED]');
+        assert.equal(redacted.apiKey, '[REDACTED]');
+        assert.equal(redacted.authorization, '[REDACTED]');
+        assert.equal(redacted.name, 'studio');
+        assert.equal(redacted.sourceType, 'rtmp');
+        assert.deepEqual(original, snapshot);
+        assert.notEqual(redacted, original);
+    });
+
+    it('returns typeof string for non-object bodies', () => {
+        const sanitizeBody = loadSanitizeBody();
+        assert.equal(sanitizeBody('plaintext'), 'string');
+        assert.equal(sanitizeBody(null), 'object');
+        assert.equal(sanitizeBody(undefined), 'undefined');
+        assert.equal(sanitizeBody(12), 'number');
+        assert.equal(sanitizeBody(['token']), 'object');
+    });
+});
+
+/**
+ * Structural guard: authorizeIngest must always call validateRtmpKey
+ * before combining the boolean (no early-return / short-circuit before the
+ * hash comparison — timing-oracle avoidance).
+ */
+describe('server.js authorizeIngest unconditional validateRtmpKey (structural guard)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../app/server.js'), 'utf8');
+
+    it('calls validateRtmpKey before combining allowed, with no early return', () => {
+        const handler = source.match(
+            /authorizeIngest:\s*\(\{\s*broadcastId,\s*token\s*\}\)\s*=>\s*\{[\s\S]*?return \{ allowed \};/
+        );
+        assert.ok(handler, 'expected authorizeIngest arrow handler in server.js wiring');
+        const body = handler[0];
+
+        assert.match(body, /const room = roomRegistry\.getRoom\(broadcastId\)/);
+        assert.match(body, /const keyValid = roomRegistry\.validateRtmpKey\(broadcastId,\s*token\)/);
+        assert.match(body, /const allowed = Boolean\(room && room\.sourceType === 'rtmp' && keyValid\)/);
+
+        const getRoomIdx = body.indexOf('roomRegistry.getRoom(broadcastId)');
+        const validateIdx = body.indexOf('roomRegistry.validateRtmpKey(broadcastId, token)');
+        const allowedIdx = body.indexOf('const allowed');
+        assert.ok(getRoomIdx !== -1 && validateIdx !== -1 && allowedIdx !== -1);
+        assert.ok(validateIdx < allowedIdx, 'validateRtmpKey must run before combining the boolean');
+
+        assert.doesNotMatch(body, /if\s*\(\s*!room/);
+        assert.doesNotMatch(body, /if\s*\(\s*room\s*===/);
+        assert.doesNotMatch(body, /return\s+\{\s*allowed:\s*false/);
+        assert.doesNotMatch(body, /return\s+false/);
+        // Short-circuit of validateRtmpKey itself must not appear (e.g. room && validate...).
+        assert.doesNotMatch(body, /&&\s*roomRegistry\.validateRtmpKey/);
+        assert.doesNotMatch(body, /room\s*&&\s*roomRegistry\.validateRtmpKey/);
+    });
+});

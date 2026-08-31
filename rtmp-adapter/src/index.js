@@ -62,6 +62,7 @@ function main() {
         broBaseUrl: config.broBaseUrl,
         mediamtxApiBase: config.mediamtxApiBase,
         reconcileIntervalMs: config.reconcileIntervalMs,
+        dynamicAuth: config.dynamicAuth,
     });
 
     const keyStore = new KeyStore(config.keysFile, log);
@@ -69,7 +70,19 @@ function main() {
 
     const localIps = createLocalIpResolver();
     const rateLimiter = new RateLimiter({ windowMs: 60000, maxAttempts: 10 });
-    const handleAuth = createAuthHandler({ keyStore, localIps, rateLimiter, log });
+    const handleAuth = createAuthHandler({
+        keyStore,
+        localIps,
+        rateLimiter,
+        log,
+        // Dynamische Autorisierung über die BRO-Rooms-Registry; der Secret-
+        // Bearer entspricht EXTERNAL_INGEST_SECRET (nie loggen).
+        dynamicAuth: {
+            enabled: config.dynamicAuth,
+            baseUrl: config.broBaseUrl,
+            secret: config.ingestSecret,
+        },
+    });
 
     const reconciler = new Reconciler({ config, log });
 

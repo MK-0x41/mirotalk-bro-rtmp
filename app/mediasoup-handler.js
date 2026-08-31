@@ -125,6 +125,16 @@ const RTC_MAX_PORT = parseInt(process.env.MEDIASOUP_RTC_MAX_PORT) || 20099;
 const DEFAULT_EXTERNAL_INGEST_PORT_MIN = 41000;
 const DEFAULT_EXTERNAL_INGEST_PORT_MAX = 41099;
 
+// Fork: externe Zufuhr nur in registrierte RTMP-Räume (Default an). server.js
+// übergibt requireRoom + roomRegistry per Option; dieser Env-Fallback deckt
+// das Modul standalone ab (gleiches Muster wie bei portMin/portMax).
+// RTMP_REQUIRE_ROOM=false ist der explizite Opt-out für den statischen
+// keys.json-Fallback-Betrieb des Adapters (statische Keys autorisieren dann
+// weiterhin über die Adapter-Datei, Verhalten unverändert).
+const REQUIRE_EXTERNAL_INGEST_ROOM = process.env.RTMP_REQUIRE_ROOM
+    ? process.env.RTMP_REQUIRE_ROOM === 'true'
+    : true;
+
 const config = {
     // Worker settings
     worker: {
@@ -1166,6 +1176,22 @@ function buildExternalIngestInfo(broadcastID, ingest) {
  * like normal producers. The room may exist without a browser broadcaster.
  */
 async function createExternalIngest(broadcastID, io, options = {}) {
+    // Fork: Raum-Pflicht. Externe Zufuhr darf ausschließlich einen in der
+    // Registry vorhandenen RTMP-Raum versorgen; alles andere ist 404, BEVOR
+    // irgendein SFU-Raum oder Transport angelegt wird. Fail-closed: ohne
+    // injizierte Registry ist kein Raum registriert. requireRoom=false ist
+    // der bewusste Opt-out (statischer keys.json-Fallback des Adapters).
+    const requireRoom = options.requireRoom !== undefined ? options.requireRoom : REQUIRE_EXTERNAL_INGEST_ROOM;
+    if (requireRoom) {
+        const roomRegistry = options.roomRegistry || null;
+        const registeredRoom = roomRegistry ? roomRegistry.getRoom(broadcastID) : null;
+        if (!registeredRoom || registeredRoom.sourceType !== 'rtmp') {
+            const notFound = new Error('Room not found or not an RTMP room');
+            notFound.status = 404;
+            throw notFound;
+        }
+    }
+
     const room = await getOrCreateRoom(broadcastID);
 
     // Idempotency: return the current transport/producer info without duplicates

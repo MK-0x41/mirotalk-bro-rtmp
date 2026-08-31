@@ -74,9 +74,11 @@ function createHttpServer({ log, handleAuth, getStatus }) {
 
         if (req.method === 'POST' && pathname === '/auth/publish') {
             readJsonBody(req, MAX_BODY_BYTES)
-                .then((body) => {
-                    // Never log body/query/headers — only ip/path/action/decision
-                    const result = handleAuth(body && typeof body === 'object' ? body : null);
+                .then(async (body) => {
+                    // Never log body/query/headers — only ip/path/action/decision.
+                    // handleAuth is async (dynamic BRO authorization) and never
+                    // throws; it always resolves to {status, body}.
+                    const result = await handleAuth(body && typeof body === 'object' ? body : null);
                     sendJson(res, result.status, result.body);
                 })
                 .catch((err) => {
