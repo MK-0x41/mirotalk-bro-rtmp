@@ -1,0 +1,19 @@
+# ============================================================================
+# Dev-only Override: zusätzliche Bindings am privaten Vagrant-Netz
+# (192.168.56.5). NIEMALS in Produktion verwenden — Basis-Compose bleibt
+# loopback-only (3016 auf 127.0.0.1; 19350 und 9997 gar nicht veröffentlicht).
+#
+# Einbindung (siehe playbooks/dev_deploy.yml):
+#   docker compose -f docker-compose.yml -f docker-compose.dev-override.yml up -d
+# Compose führt Port-Listen zusammen (Append + Dedup identischer Einträge):
+# Das Loopback-Binding der Basis-Datei bleibt ERHALTEN — beabsichtigt, damit
+# die VM-internen Checks (wait_for/uri auf 127.0.0.1) weiter funktionieren.
+# DEV_BIND_IP wird vom Playbook durchgereicht (Default hier 192.168.56.5).
+# ============================================================================
+services:
+    bro:
+        ports:
+            - '${DEV_BIND_IP:-192.168.56.5}:${PORT:-3016}:${PORT:-3016}'
+    mediamtx:
+        ports:
+            - '${DEV_BIND_IP:-192.168.56.5}:19350:19350'

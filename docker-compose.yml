@@ -1,0 +1,129 @@
+# ============================================================================
+# MiroTalk BRO — RTMP-Spezialinstanz (siehe SPEC.md)
+#
+# Drei Dienste im Standard-Bridge-Netzwerk (Compose-Netzwerk ist intern;
+# nur die unten explizit gelisteten Ports werden auf den Host veröffentlicht):
+#   bro           — MiroTalk BRO aus diesem Repository (SFU-Modus, Dockerfile
+#                   unverändert aus dem Upstream-Fork)
+#   mediamtx      — RTMPS-Terminierung + Publisher-Authentifizierung,
+#                   angeheftet auf bluenviron/mediamtx:1.20.1 (v1.20.1)
+#   rtmp-adapter  — Auth-Endpoint, Reconciliation, FFmpeg (kein npm-Dependency)
+#
+# Vor dem Start: `.env` aus `.env.example` erzeugen und `BRO_INGEST_SECRET`
+# setzen; `config/keys.json` und `certs/tls.{crt,key}` bereitstellen
+# (Dev: Vagrant-Playbook, Produktion: Installer).
+# ============================================================================
+
+services:
+    bro:
+        build:
+            context: .
+            dockerfile: Dockerfile
+        image: mirotalkbro-rtmp:local
+        hostname: bro
+        # Non-root wie im Upstream-Template (Image nutzt ohnehin User node).
+        user: '1000:1000'
+        restart: unless-stopped
+        ports:
+            # Web nur auf Loopback des Hosts; TLS-Terminierung übernimmt der
+            # Host-Nginx (Installer-Repositorium), nicht dieser Stack.
+            - '127.0.0.1:${PORT:-3016}:${PORT:-3016}'
+            # Mediasoup-RTC-Bereich (SFU): öffentlich, TCP+UDP, aus .env mit
+            # Defaults 40200-40300 (SPEC Abschnitt 10).
+            - '${MEDIASOUP_RTC_MIN_PORT:-40200}-${MEDIASOUP_RTC_MAX_PORT:-40300}:${MEDIASOUP_RTC_MIN_PORT:-40200}-${MEDIASOUP_RTC_MAX_PORT:-40300}/tcp'
+            - '${MEDIASOUP_RTC_MIN_PORT:-40200}-${MEDIASOUP_RTC_MAX_PORT:-40300}:${MEDIASOUP_RTC_MIN_PORT:-40200}-${MEDIASOUP_RTC_MAX_PORT:-40300}/udp'
+        volumes:
+            # Restliche BRO-Konfiguration kommt aus der .env
+            # (Upstream-Konvention aus docker-compose.template.yml).
+            # Datei muss existieren.
+            - ./.env:/src/.env:ro
+        environment:
+            # external-ingest-API aktivieren (BRO-Patch). EXTERNAL_INGEST_SECRET
+            # wird bewusst per environment gesetzt (gewinnt gegen die gemountete
+            # .env, da dotenv vorhandene Prozess-Variablen nicht überschreibt)
+            # und speist sich aus derselben Variable wie der rtmp-adapter.
+            EXTERNAL_INGEST_ENABLED: 'true'
+            EXTERNAL_INGEST_SECRET: ${BRO_INGEST_SECRET:?BRO_INGEST_SECRET
+              fehlt – in .env setzen (siehe .env.example)}
+            BROADCASTING: sfu
+        # Unabhängig von mediamtx: BRO startet auch ohne Ingest-Quelle.
+        # depends_on bewusst weggelassen.
+
+    mediamtx:
+        # Angeheftet auf den aktuellen stabilen Release v1.20.1
+        # (GitHub-Releases, 18.08.2026); Docker-Hub-Tag ohne 'v'-Präfix.
+        # Optionnamen in mediamtx.yml sind gegen v1.20.1 verifiziert.
+        # Zusätzlich per sha256-Digest gepinnt (Unveränderlichkeit gegenüber
+        # Registry-Manipulation). Digest-Aktualisierung:
+        #   TOKEN=$(curl -s "https://auth.docker.io/token?service=registry.docker.io\
+        # &scope=repository:bluenviron/mediamtx:pull" | jq -r .token)
+        #   curl -sI -H "Authorization: Bearer $TOKEN" \
+        #     -H "Accept: application/vnd.docker.distribution.manifest.list.v2+json" \
+        #     https://registry-1.docker.io/v2/bluenviron/mediamtx/manifests/1.20.1 \
+        #     | grep -i docker-content-digest
+        image: bluenviron/mediamtx:1.20.1@sha256:1b029d11049be75630e9b73bb0d5f47b08a7db4eaee89a80bf8f53bc40e56414
+        hostname: mediamtx
+        restart: unless-stopped
+        # Konfiguration explizit als Argument übergeben: das Image bringt
+        # selbst eine /mediamtx.yml mit, die sonst dem Mount vorgezogen würde.
+        command: ['/etc/mediamtx/mediamtx.yml']
+        ports:
+            # Öffentlicher RTMPS-Ingest (einziger öffentlicher MediaMTX-Port).
+            - '1935:1935'
+            # 19350 (Plain-RTMP) und 9997 (REST-API) bewusst NICHT
+            # veröffentlicht — nur Compose-intern erreichbar
+            # (SPEC Abschnitt 10).
+        volumes:
+            - ./mediamtx.yml:/etc/mediamtx/mediamtx.yml:ro
+            - ./certs:/etc/mediamtx/certs:ro
+
+    rtmp-adapter:
+        build:
+            context: ./rtmp-adapter
+        image: mirotalkbro-rtmp-adapter:local
+        hostname: rtmp-adapter
+        restart: unless-stopped
+        environment:
+            # Port an .env koppeln (PORT-Default 3016), damit Adapter und BRO
+            # auch bei abweichendem Port zusammenarbeiten.
+            BRO_BASE_URL: 'http://bro:${PORT:-3016}'
+            BRO_INGEST_SECRET: ${BRO_INGEST_SECRET:?BRO_INGEST_SECRET
+              fehlt – in .env setzen (siehe .env.example)}
+            MEDIAMTX_API_BASE: http://mediamtx:9997
+            MEDIAMTX_RTMP_SOURCE: rtmp://mediamtx:19350
+            ADAPTER_AUTH_PORT: '8080'
+            KEYS_FILE: /app/config/keys.json
+            RECONCILE_INTERVAL_MS: '${RECONCILE_INTERVAL_MS:-2000}'
+            MAX_CONCURRENT_INGESTS: '${MAX_CONCURRENT_INGESTS:-4}'
+            VIDEO_BITRATE: '${VIDEO_BITRATE:-2500k}'
+            AUDIO_BITRATE: '${AUDIO_BITRATE:-128k}'
+            KEYFRAME_SECONDS: '${KEYFRAME_SECONDS:-2}'
+            VIDEO_PRESET: '${VIDEO_PRESET:-veryfast}'
+            LOG_LEVEL: '${LOG_LEVEL:-info}'
+        volumes:
+            - ./config/keys.json:/app/config/keys.json:ro
+        # Port 8080 (Auth-Endpoint) wird NICHT veröffentlicht — nur
+        # Compose-intern (MediaMTX ruft http://rtmp-adapter:8080/auth/publish).
+        depends_on:
+            # service_started genügt: der Adapter toleriert spät startende
+            # Nachbarn selbst (Backoff/Retry im Reconciler).
+            - bro
+            - mediamtx
+        healthcheck:
+            # Node-Fetch statt curl (slim-Image ohne curl)
+            test:
+                [
+                    'CMD',
+                    'node',
+                    '-e',
+                    "fetch('http://127.0.0.1:8080/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+                ]
+            interval: 30s
+            timeout: 5s
+            retries: 3
+            start_period: 10s
+
+# Das Standard-Bridge-Netzwerk ist ausreichend: alle service-übergreifenden
+# Verbindungen (Auth-Callback, REST, interner RTMP-Pull, RTP zum SFU) laufen
+# intern; öffentlich sind ausschließlich die oben gelisteten Host-Ports
+# (3016 auf Loopback, RTC-Bereich, 1935/RTMPS).

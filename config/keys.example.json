@@ -1,0 +1,8 @@
+{
+    "_comment": "Vorlage für config/keys.json (Datei nach config/keys.json kopieren). keyHash = sha256(token) als 64 Hex-Zeichen; Token z. B. erzeugen mit: openssl rand -hex 32; Hash berechnen: node -e \"console.log(require('crypto').createHash('sha256').update('TOKEN').digest('hex'))\". Unbekannte Felder wie _comment werden vom Adapter ignoriert. Encoder-Publish: rtmps://<host>:1935/live mit Stream-Key <broadcastId>?token=<TOKEN>.",
+    "streams": {
+        "dev-broadcast": {
+            "keyHash": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+    }
+}

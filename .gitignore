@@ -13,6 +13,21 @@ npm-debug.log
 
 # personal
 .env
-docker-compose.yml
+# Fork-Abweichung: Upstream ignoriert docker-compose.yml als lokale Dev-Datei;
+# in diesem Fork ist die Datei im Repo-Root jedoch der produktive Stack und
+# wird bewusst getrackt.
 docker-push.sh
 turnserver.conf
+
+# Fork: Secrets und instanzspezifische Daten niemals committen
+# (Vorlagen wie config/keys.example.json, certs/README.md und certs/.gitkeep
+# bleiben bewusst getrackt; .env ist bereits weiter oben ignoriert.)
+config/keys.json
+certs/*.crt
+certs/*.key
+certs/*.pem
+
+# Vagrant-/Ansible-Dev-Umgebung: lokale VM-Daten und echte Inventare ungetrackt
+.vagrant/
+inventory/*.yml
+!inventory/*.yml.example

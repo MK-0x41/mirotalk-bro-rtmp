@@ -1,0 +1,87 @@
+# ============================================================================
+# MediaMTX-Konfiguration für die MiroTalk-BRO-RTMP-Spezialinstanz
+#
+# Angeheftete Version: bluenviron/mediamtx v1.20.1 (Docker-Tag: 1.20.1).
+# Alle Optionnamen sind exakt an der Datei mediamtx.yml der Version v1.20.1
+# verifiziert:
+# https://github.com/bluenviron/mediamtx/blob/v1.20.1/mediamtx.yml
+#
+# Architektur (siehe SPEC.md):
+#   * Öffentlicher Publisher-Ingest ausschließlich über RTMPS :1935.
+#   * Internes Plain-RTMP :19350 (Compose-Netzwerk) — davon zieht der
+#     rtmp-adapter den Stream für FFmpeg. Diesen Port NIEMALS auf den Host
+#     publishen (Produktion)!
+#   * Publisher-Authentifizierung erfolgt durch den rtmp-adapter
+#     (authMethod: http). Jede Aktion — auch API-Zugriffe — wird an den
+#     Adapter delegiert und dort fail-closed entschieden.
+# ============================================================================
+
+# --- Logging ---------------------------------------------------------------
+
+logLevel: info
+logDestinations: [stdout]
+# Strukturierte Logs (JSONL) vereinfachen das Aufnehmen in zentrale Logs.
+logStructured: false
+
+# --- Authentifizierung -------------------------------------------------------
+# Externe Authentifizierung über den rtmp-adapter. MediaMTX sendet für JEDE
+# Aktion (publish/read/playback/api/…) einen POST mit
+# {ip, user, password, token, action, path, protocol, id, query, userAgent};
+# nur 2xx erlaubt die Aktion. Der Adapter erlaubt:
+#   publish  = nur mit gültigem Stream-Key für live/<broadcastId>,
+#   read/api = nur von der Adapter-IP selbst (interner Pull bzw. Paths-Liste),
+#   alles andere wird abgewiesen (401) — insbesondere playback.
+authMethod: http
+authHTTPAddress: http://rtmp-adapter:8080/auth/publish
+
+# --- Control API -------------------------------------------------------------
+# Nur für den rtmp-adapter (Pfad-Abgleich); NICHT auf den Host publishen.
+api: yes
+apiAddress: :9997
+
+# --- Nicht benötigte Server explizit deaktiviert ----------------------------
+
+metrics: no
+pprof: no
+playback: no
+srt: no
+webrtc: no
+hls: no
+# MoQ (Media over QUIC) ist ab v1.19.x standardmäßig aktiv — explizit aus.
+moq: no
+
+# --- RTSP --------------------------------------------------------------------
+# Interner Standard-RTSP-Listener (Compose-Netzwerk). Nur TCP als Transport
+# hält die internen UDP-Ports (8000/8001, Multicast) zu.
+rtsp: yes
+rtspAddress: :8554
+rtspTransports: [tcp]
+
+# --- RTMP / RTMPS ------------------------------------------------------------
+# rtmpEncryption: optional => BEIDE Listener laufen: Plain-RTMP auf
+# rtmpAddress (intern, :19350) UND RTMPS auf rtmpsAddress (öffentlich, :1935).
+# Hinweis: Bei strict würde der Plain-Listener nicht starten.
+rtmp: yes
+rtmpEncryption: optional
+# INTERN (Compose-Netzwerk): Plain-RTMP für den Adapter-Pull und Dev-Tests.
+# Port niemals auf den Host publishen (Produktion)!
+rtmpAddress: :19350
+# ÖFFENTLICH: RTMPS-Ingest für OBS/Encoder (TLS-Terminierung hier).
+rtmpsAddress: :1935
+rtmpServerCert: /etc/mediamtx/certs/tls.crt
+rtmpServerKey: /etc/mediamtx/certs/tls.key
+
+# --- Pfad-Defaults -----------------------------------------------------------
+# Pro Pfad genau EIN Publisher: ein zweiter Publisher mit gleichem Pfad wird
+# abgewiesen (overridePublisher: false) — siehe SPEC Abschnitt 14.
+pathDefaults:
+    overridePublisher: false
+
+# --- Pfade -------------------------------------------------------------------
+# Nur exakt live/<broadcastId> ist als Pfad erlaubt (Regex mit '~'-Präfix).
+# Publishes auf andere Pfade scheitern bereits an der Pfadkonfiguration —
+# zusätzliche Verteidigungslinie zur Adapter-Authentifizierung.
+# Später können hier gezielt per-path Overrides gesetzt werden (z. B.
+# sourceOnDemand oder weitere Beschränkungen).
+paths:
+    "~^live/[A-Za-z0-9_-]{1,128}$":
