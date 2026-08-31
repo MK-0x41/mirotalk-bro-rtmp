@@ -10,6 +10,7 @@
 const mediasoup = require('mediasoup');
 const os = require('os');
 const fs = require('fs');
+const crypto = require('crypto');
 
 const logs = require('./logs');
 const log = new logs('mediasoup');
@@ -115,6 +116,14 @@ function findValidAddress(addresses) {
 
 const RTC_MIN_PORT = parseInt(process.env.MEDIASOUP_RTC_MIN_PORT) || 20000;
 const RTC_MAX_PORT = parseInt(process.env.MEDIASOUP_RTC_MAX_PORT) || 20099;
+
+// Default UDP port range for external ingest PlainTransports (raw RTP).
+// INTERNAL to the compose network only: never publish it to the host and
+// never let it overlap the WebRTC RTC port range above. server.js reads
+// EXTERNAL_INGEST_PORT_MIN/MAX and passes them through; these are the
+// fallbacks when the module is used standalone.
+const DEFAULT_EXTERNAL_INGEST_PORT_MIN = 41000;
+const DEFAULT_EXTERNAL_INGEST_PORT_MAX = 41099;
 
 const config = {
     // Worker settings
@@ -256,6 +265,7 @@ async function getOrCreateRoom(broadcastID) {
         broadcasterTransport: null,
         producers: new Map(), // producerId -> producer
         viewers: new Map(), // socketId -> { transport, consumers: Map<producerId, consumer>, username }
+        hadExternalIngest: false, // sticky marker: room once had an external (RTMP) ingest, never cleared on stop
     };
 
     log.debug('Room created', { broadcastID, routerId: router.id });
@@ -343,6 +353,12 @@ function handleSfuConnection(socket, io, broadcasters, viewers) {
     socket.on('sfu-createBroadcasterTransport', async (broadcastID, callback) => {
         try {
             const room = await getOrCreateRoom(broadcastID);
+
+            // Exclusive source (v1 non-goal: no camera + RTMP mixing): reject
+            // when the room is already served by an active external ingest.
+            if (room.externalIngest?.active) {
+                throw new Error('Room already has an external ingest, browser broadcaster is exclusive');
+            }
 
             // Cancel any pending broadcaster disconnect timer (browser refresh)
             if (broadcasterDisconnectTimers[broadcastID]) {
@@ -976,6 +992,39 @@ function handleSfuDisconnect(socket, broadcasters, viewers, io) {
                     return;
                 }
 
+                // Never delete a room that still has an active external ingest
+                // (e.g. RTMP adapter feeding viewers): keep the room alive and
+                // fully detach the stale browser broadcaster registration,
+                // otherwise later ingest starts would 409 forever.
+                if (currentRoom.externalIngest?.active) {
+                    delete broadcasters[broadcastID];
+                    // Browser-Broadcaster sauber abtrennen: Registrierung,
+                    // Sende-Transport und eigenen Viewer-Eintrag entfernen,
+                    // damit der Raum ausschließlich vom Ingest weiterlebt.
+                    currentRoom.broadcasterSocketId = null;
+                    if (currentRoom.broadcasterTransport) {
+                        try {
+                            currentRoom.broadcasterTransport.close();
+                        } catch (e) {
+                            log.warn('Error closing stale broadcaster transport', e.message);
+                        }
+                        currentRoom.broadcasterTransport = null;
+                    }
+                    if (currentRoom.viewers.has(socket.id)) {
+                        const staleViewer = currentRoom.viewers.get(socket.id);
+                        try {
+                            if (staleViewer.recvTransport) staleViewer.recvTransport.close();
+                        } catch (e) {}
+                        try {
+                            if (staleViewer.sendTransport) staleViewer.sendTransport.close();
+                        } catch (e) {}
+                        currentRoom.viewers.delete(socket.id);
+                        delete viewers[socket.id];
+                    }
+                    log.debug('SFU broadcaster gone but external ingest active, keeping room', { broadcastID });
+                    return;
+                }
+
                 log.debug('SFU broadcaster grace period expired, cleaning up', { broadcastID });
 
                 // Notify all viewers and clean them from the global viewers object
@@ -1014,10 +1063,302 @@ function handleSfuDisconnect(socket, broadcasters, viewers, io) {
                 username: viewer.username,
                 remainingViewers: room.viewers.size,
             });
+
+            // Fork fix (room leak): rooms without a browser broadcaster are only
+            // deleted via the broadcaster disconnect path upstream, so a room that
+            // once had an external ingest would leak forever after its producers
+            // were stopped and the last viewer left. Delete it when nothing keeps
+            // it alive anymore. Pure browser rooms keep upstream semantics: the
+            // marker is only ever set by createExternalIngest.
+            if (
+                room.hadExternalIngest === true &&
+                room.viewers.size === 0 &&
+                !room.broadcasterSocketId &&
+                room.producers.size === 0 &&
+                !room.externalIngest
+            ) {
+                deleteRoom(broadcastID);
+            }
+
             return true;
         }
     }
     return false;
+}
+
+// =====================================================
+// External ingest (plain RTP source, e.g. RTMP adapter)
+// =====================================================
+
+/**
+ * Select a codec from the router RTP capabilities for plain RTP ingest.
+ * `preferredProfileLevelId` is honored when the router advertises multiple
+ * codecs for the same mimeType (e.g. H264 with different profiles).
+ */
+function selectIngestCodec(router, kind, mimeType, preferredProfileLevelId) {
+    const codecs = router.rtpCapabilities.codecs.filter(
+        (codec) => codec.kind === kind && codec.mimeType.toLowerCase() === mimeType.toLowerCase()
+    );
+    if (preferredProfileLevelId) {
+        const preferred = codecs.find(
+            (codec) => codec.parameters && codec.parameters['profile-level-id'] === preferredProfileLevelId
+        );
+        if (preferred) return preferred;
+    }
+    return codecs[0] || null;
+}
+
+/**
+ * Build the plain RTP rtpParameters mediasoup expects in produce().
+ */
+function buildIngestRtpParameters(codec, ssrc) {
+    const codecEntry = {
+        mimeType: codec.mimeType,
+        payloadType: codec.preferredPayloadType,
+        clockRate: codec.clockRate,
+        parameters: {},
+        rtcpFeedback: codec.rtcpFeedback || [],
+    };
+    if (codec.kind === 'audio') {
+        codecEntry.channels = codec.channels || 2;
+    }
+    if (codec.mimeType.toLowerCase() === 'video/h264') {
+        codecEntry.parameters['packetization-mode'] = 1;
+        codecEntry.parameters['profile-level-id'] = codec.parameters?.['profile-level-id'] || '42e01f';
+    }
+    return {
+        codecs: [codecEntry],
+        encodings: [{ ssrc }],
+    };
+}
+
+/**
+ * Describe one ingest track (video or audio) exactly as mediasoup reports it.
+ *
+ * NOTE on rtcpPort: with comedia:true and rtcpMux:false mediasoup allocates a
+ * dedicated RTCP port, but `rtcpTuple` is only reported once the first RTCP
+ * packet from the source has arrived. When null the caller must omit
+ * `rtcp_port` (ffmpeg then defaults to rtp port + 1, which matches the
+ * mediasoup paired port allocation).
+ */
+function describeExternalIngestTrack(transport, producer) {
+    const codec = producer.rtpParameters.codecs[0];
+    return {
+        port: transport.tuple.localPort,
+        rtcpPort: transport.rtcpTuple ? transport.rtcpTuple.localPort : null,
+        payloadType: codec.payloadType,
+        ssrc: producer.rtpParameters.encodings[0].ssrc,
+        profile: codec.parameters && codec.parameters['profile-level-id'] ? codec.parameters['profile-level-id'] : null,
+    };
+}
+
+function buildExternalIngestInfo(broadcastID, ingest) {
+    return {
+        broadcastId: broadcastID,
+        video: describeExternalIngestTrack(ingest.videoTransport, ingest.videoProducer),
+        audio: describeExternalIngestTrack(ingest.audioTransport, ingest.audioProducer),
+    };
+}
+
+/**
+ * Create (or return the existing) plain RTP ingest for a broadcast room, so an
+ * external process can inject H264 video + Opus audio that viewers consume
+ * like normal producers. The room may exist without a browser broadcaster.
+ */
+async function createExternalIngest(broadcastID, io, options = {}) {
+    const room = await getOrCreateRoom(broadcastID);
+
+    // Idempotency: return the current transport/producer info without duplicates
+    if (room.externalIngest && room.externalIngest.active) {
+        return buildExternalIngestInfo(broadcastID, room.externalIngest);
+    }
+
+    // Exclusive source (v1 non-goal: no camera + RTMP mixing): reject when the
+    // room already has a browser broadcaster or any non-RTMP producer. The API
+    // route maps this error to HTTP 409.
+    const hasBrowserSource =
+        Boolean(room.broadcasterSocketId) ||
+        [...room.producers.values()].some((producer) => producer.appData?.source !== 'rtmp');
+    if (hasBrowserSource) {
+        const conflict = new Error('Room already has a browser broadcaster, external ingest is exclusive');
+        conflict.status = 409;
+        throw conflict;
+    }
+
+    // Explicit UDP port range for the plain RTP transports. Without it mediasoup
+    // would allocate from the worker default range (40000-49999), which can
+    // overlap the host-published RTC ports and make raw RTP listeners
+    // host-reachable. Fail closed before creating any transport when the range
+    // is invalid or overlaps the WebRTC RTC range in use.
+    const ingestPortMin = Number.isInteger(options.portMin) ? options.portMin : DEFAULT_EXTERNAL_INGEST_PORT_MIN;
+    const ingestPortMax = Number.isInteger(options.portMax) ? options.portMax : DEFAULT_EXTERNAL_INGEST_PORT_MAX;
+    if (ingestPortMin < 1024 || ingestPortMax > 65535 || ingestPortMin > ingestPortMax) {
+        throw new Error(`Invalid external ingest port range ${ingestPortMin}-${ingestPortMax}`);
+    }
+    if (ingestPortMin <= RTC_MAX_PORT && RTC_MIN_PORT <= ingestPortMax) {
+        throw new Error(
+            `External ingest port range ${ingestPortMin}-${ingestPortMax} overlaps the WebRTC RTC port range ` +
+                `${RTC_MIN_PORT}-${RTC_MAX_PORT} (MEDIASOUP_RTC_MIN_PORT/MEDIASOUP_RTC_MAX_PORT)`
+        );
+    }
+
+    // comedia: true learns the source address from the first incoming RTP
+    // packet, so no connect() call is needed. mediasoup 3.26 expects a single
+    // TransportListenInfo object (not an array) with portRange {min, max}
+    // numbers; rtcpMux: false requires an explicit rtcpListenInfo (mediasoup
+    // picks a distinct port within the same range).
+    const plainTransportOptions = {
+        listenInfo: {
+            protocol: 'udp',
+            ip: '0.0.0.0',
+            portRange: { min: ingestPortMin, max: ingestPortMax },
+        },
+        rtcpListenInfo: {
+            protocol: 'udp',
+            ip: '0.0.0.0',
+            portRange: { min: ingestPortMin, max: ingestPortMax },
+        },
+        rtcpMux: false,
+        comedia: true,
+    };
+
+    const videoCodec = selectIngestCodec(room.router, 'video', 'video/H264', '42e01f');
+    const audioCodec = selectIngestCodec(room.router, 'audio', 'audio/opus');
+    if (!videoCodec || !audioCodec) {
+        throw new Error('Router does not provide H264 and Opus codecs for external ingest');
+    }
+
+    const videoSsrc = crypto.randomInt(1, 0x7fffffff);
+    const audioSsrc = crypto.randomInt(1, 0x7fffffff);
+
+    let videoTransport = null;
+    let audioTransport = null;
+    let videoProducer = null;
+    let audioProducer = null;
+
+    try {
+        videoTransport = await room.router.createPlainTransport(plainTransportOptions);
+        audioTransport = await room.router.createPlainTransport(plainTransportOptions);
+
+        videoProducer = await videoTransport.produce({
+            kind: 'video',
+            rtpParameters: buildIngestRtpParameters(videoCodec, videoSsrc),
+            appData: { external: true, source: 'rtmp' },
+        });
+        audioProducer = await audioTransport.produce({
+            kind: 'audio',
+            rtpParameters: buildIngestRtpParameters(audioCodec, audioSsrc),
+            appData: { external: true, source: 'rtmp' },
+        });
+
+        room.externalIngest = {
+            active: true,
+            videoTransport,
+            audioTransport,
+            videoProducer,
+            audioProducer,
+            startedAt: new Date().toISOString(),
+        };
+        // Sticky marker for the viewer-disconnect cleanup: never cleared on stop
+        room.hadExternalIngest = true;
+
+        // Register like browser producers so viewers can discover and consume them
+        for (const producer of [videoProducer, audioProducer]) {
+            room.producers.set(producer.id, producer);
+            producer.on('transportclose', () => {
+                room.producers.delete(producer.id);
+            });
+        }
+
+        // Notify all existing viewers exactly like sfu-produce does
+        for (const [viewerSocketId] of room.viewers) {
+            io.to(viewerSocketId).emit('sfu-newProducer', { producerId: videoProducer.id, kind: videoProducer.kind });
+            io.to(viewerSocketId).emit('sfu-newProducer', { producerId: audioProducer.id, kind: audioProducer.kind });
+        }
+
+        log.info('External ingest started', {
+            broadcastID,
+            videoTransportId: videoTransport.id,
+            audioTransportId: audioTransport.id,
+            videoProducerId: videoProducer.id,
+            audioProducerId: audioProducer.id,
+        });
+
+        return buildExternalIngestInfo(broadcastID, room.externalIngest);
+    } catch (error) {
+        // Clean up partially created resources before failing
+        for (const producer of [videoProducer, audioProducer]) {
+            try {
+                if (producer && !producer.closed) producer.close();
+            } catch (e) {}
+        }
+        for (const transport of [videoTransport, audioTransport]) {
+            try {
+                if (transport && !transport.closed) transport.close();
+            } catch (e) {}
+        }
+        throw error;
+    }
+}
+
+/**
+ * Stop an active external ingest. No-op success when there is nothing to stop.
+ */
+async function stopExternalIngest(broadcastID) {
+    const room = getRoom(broadcastID);
+    const ingest = room ? room.externalIngest : null;
+    if (!ingest || !ingest.active) {
+        return;
+    }
+
+    // Close producers first so viewers get producerClosed exactly like browser
+    // producers, then close the plain transports.
+    for (const producer of [ingest.videoProducer, ingest.audioProducer]) {
+        if (!producer) continue;
+        room.producers.delete(producer.id);
+        try {
+            if (!producer.closed) producer.close();
+        } catch (e) {
+            log.warn('External ingest producer close error', e.message);
+        }
+    }
+    for (const transport of [ingest.videoTransport, ingest.audioTransport]) {
+        if (!transport) continue;
+        try {
+            if (!transport.closed) transport.close();
+        } catch (e) {
+            log.warn('External ingest transport close error', e.message);
+        }
+    }
+
+    room.externalIngest = null;
+
+    log.info('External ingest stopped', { broadcastID });
+
+    // Remove the room when nothing keeps it alive anymore (no viewers, no
+    // broadcaster, no producers and no active external ingest), mirroring the
+    // browser broadcast cleanup semantics
+    if (room.viewers.size === 0 && !room.broadcasterSocketId && room.producers.size === 0 && !room.externalIngest) {
+        deleteRoom(broadcastID);
+    }
+}
+
+/**
+ * List all active external ingests.
+ */
+function getExternalIngestStatus() {
+    const ingests = [];
+    for (const [broadcastID, room] of Object.entries(sfuRooms)) {
+        if (room.externalIngest && room.externalIngest.active) {
+            ingests.push({
+                broadcastId: broadcastID,
+                startedAt: room.externalIngest.startedAt,
+                videoProducerId: room.externalIngest.videoProducer.id,
+                audioProducerId: room.externalIngest.audioProducer.id,
+            });
+        }
+    }
+    return ingests;
 }
 
 // =====================================================
@@ -1031,6 +1372,9 @@ module.exports = {
     deleteRoom,
     handleSfuConnection,
     handleSfuDisconnect,
+    createExternalIngest,
+    stopExternalIngest,
+    getExternalIngestStatus,
     sfuRooms,
     config,
 };

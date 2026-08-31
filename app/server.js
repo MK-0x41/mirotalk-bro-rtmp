@@ -9,6 +9,9 @@
  * @license For private project or commercial purposes contact us at: license.mirotalk@gmail.com
  * @author  Miroslav Pejic - miroslav.pejic.85@gmail.com
  * @version 1.3.77
+ *
+ * NOTE (fork): the JSON body error logger below redacts sensitive headers
+ * (Authorization, Cookie, ...) before logging (Sicherheits-Fix im Fork).
  */
 
 require('dotenv').config();
@@ -250,10 +253,22 @@ app.use((req, res, next) => {
     next();
 });
 
+// Sicherheits-Fix im Fork: sensible Header redigieren, damit Geheimnisse
+// (z. B. `Authorization: Bearer <token>`) nicht in Logdateien landen.
+const SENSITIVE_HEADERS = new Set(['authorization', 'cookie', 'x-api-key', 'proxy-authorization']);
+
+function sanitizeHeaders(headers) {
+    const safeHeaders = { ...headers };
+    for (const name of Object.keys(safeHeaders)) {
+        if (SENSITIVE_HEADERS.has(name.toLowerCase())) safeHeaders[name] = '[REDACTED]';
+    }
+    return safeHeaders;
+}
+
 app.use((err, req, res, next) => {
     if (err instanceof SyntaxError || err.status === 400 || 'body' in err) {
         log.error('Request Error', {
-            header: req.headers,
+            header: sanitizeHeaders(req.headers),
             body: req.body,
             error: err.message,
         });
@@ -408,6 +423,39 @@ app.post(`${apiBasePath}/join`, (req, res) => {
 app.get('/api/v1/config', (req, res) => {
     res.json({ broadcastingMode, adminOnlyBroadcast });
 });
+
+// External ingest API for the rtmp-adapter sidecar (internal-only, SFU mode only)
+const externalIngestEnabled = getEnvBoolean(process.env.EXTERNAL_INGEST_ENABLED);
+const externalIngestSecret = process.env.EXTERNAL_INGEST_SECRET || '';
+// UDP port range for the ingest PlainTransports (raw RTP). Internal to the
+// compose network only: must not be published to the host and must not overlap
+// MEDIASOUP_RTC_MIN_PORT/MEDIASOUP_RTC_MAX_PORT (validated in mediasoup-handler).
+const externalIngestPortMin = parseInt(process.env.EXTERNAL_INGEST_PORT_MIN, 10) || 41000;
+const externalIngestPortMax = parseInt(process.env.EXTERNAL_INGEST_PORT_MAX, 10) || 41099;
+if (externalIngestEnabled && isSFU) {
+    const { createExternalIngestRouter } = require('./external-ingest');
+    app.use(
+        apiBasePath + '/external-ingest',
+        createExternalIngestRouter({
+            config: { externalIngestEnabled, externalIngestSecret },
+            handlers: {
+                createExternalIngest: (broadcastId) =>
+                    sfuHandler.createExternalIngest(broadcastId, io, {
+                        portMin: externalIngestPortMin,
+                        portMax: externalIngestPortMax,
+                    }),
+                stopExternalIngest: (broadcastId) => sfuHandler.stopExternalIngest(broadcastId),
+                getExternalIngestStatus: () => sfuHandler.getExternalIngestStatus(),
+            },
+        })
+    );
+    log.info('External ingest API enabled', {
+        path: apiBasePath + '/external-ingest',
+        portRange: `${externalIngestPortMin}-${externalIngestPortMax}`,
+    });
+} else if (externalIngestEnabled) {
+    log.warn('External ingest API requires BROADCASTING=sfu, not mounted');
+}
 
 app.use((req, res) => {
     return notFound(res);
