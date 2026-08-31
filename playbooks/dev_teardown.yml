@@ -1,0 +1,87 @@
+---
+# ============================================================================
+# Dev-Teardown: Compose-Stack der Vagrant-Dev-VM herunterfahren.
+# KEIN Produktions-Werkzeug — Produktion übernimmt der separate (private)
+# Installer.
+#
+# Standardmäßig bleiben Images, Volumes und das Projektverzeichnis inkl.
+# .secrets/ erhalten (schnelles Re-Deploy, stabile Dev-Secrets). Verhalten
+# per Extra-Vars steuerbar:
+#   -e mirotalkbro_rtp_dev_remove_images=true
+#       → zusätzlich `docker compose down --rmi local`
+#   -e mirotalkbro_rtp_dev_remove_project_dir=true
+#       → entfernt {{ project_dir }} inklusive .secrets/ endgültig
+# ============================================================================
+- name: MiroTalk BRO RTMP – Dev-Teardown
+  hosts: all
+  become: true
+  gather_facts: false
+
+  vars:
+    mirotalkbro_rtp_project_dir: /opt/mirotalkbro-rtmp
+    mirotalkbro_rtp_dev_remove_images: false
+    mirotalkbro_rtp_dev_remove_project_dir: false
+
+  tasks:
+    - name: Compose-Projektdatei prüfen
+      ansible.builtin.stat:
+        path: "{{ mirotalkbro_rtp_project_dir }}/docker-compose.yml"
+      register: dev_teardown_compose_file
+
+    - name: Compose-Stack herunterfahren
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - --project-directory
+          - "{{ mirotalkbro_rtp_project_dir }}"
+          - down
+        chdir: "{{ mirotalkbro_rtp_project_dir }}"
+      when:
+        - dev_teardown_compose_file.stat.exists
+        - not (mirotalkbro_rtp_dev_remove_images | bool)
+      register: dev_teardown_compose_down
+      changed_when: >-
+        'Stopped' in (dev_teardown_compose_down.stdout
+                      + dev_teardown_compose_down.stderr)
+        or 'Removed' in (dev_teardown_compose_down.stdout
+                         + dev_teardown_compose_down.stderr)
+        or 'Network' in (dev_teardown_compose_down.stdout
+                         + dev_teardown_compose_down.stderr)
+
+    - name: Compose-Stack herunterfahren (inkl. lokal gebauter Images)
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - --project-directory
+          - "{{ mirotalkbro_rtp_project_dir }}"
+          - down
+          - --rmi
+          - local
+        chdir: "{{ mirotalkbro_rtp_project_dir }}"
+      when:
+        - dev_teardown_compose_file.stat.exists
+        - mirotalkbro_rtp_dev_remove_images | bool
+      register: dev_teardown_compose_down
+      changed_when: >-
+        'Stopped' in (dev_teardown_compose_down.stdout
+                      + dev_teardown_compose_down.stderr)
+        or 'Removed' in (dev_teardown_compose_down.stdout
+                         + dev_teardown_compose_down.stderr)
+        or 'Network' in (dev_teardown_compose_down.stdout
+                         + dev_teardown_compose_down.stderr)
+
+    - name: Projektverzeichnis entfernen (opt-in, inkl. .secrets/)
+      ansible.builtin.file:
+        path: "{{ mirotalkbro_rtp_project_dir }}"
+        state: absent
+      when: mirotalkbro_rtp_dev_remove_project_dir | bool
+
+    - name: Teardown-Ergebnis ausgeben
+      ansible.builtin.debug:
+        msg: >-
+          Compose-Stack{{ '' if dev_teardown_compose_file.stat.exists
+          else ' (keines vorhanden)' }} heruntergefahren. Images/Volumes und
+          Projektverzeichnis blieben erhalten; Entfernen nur per Extra-Var
+          (siehe Playbook-Kopf).

@@ -1,0 +1,17 @@
+# yamllint-Konfiguration der RTMP-Spezialinstanz, orientiert an bewährten
+# yamllint-Konventionen aus verwandten Infrastruktur-Repositorien:
+# Zeilenlänge nur als Warnung; truthy erlaubt zusätzlich yes/no (Idiom
+# der Mediamtx-Upstream-Konfiguration); document-start und
+# comments-indentation sind deaktiviert (Kommentar-Köpfe ohne ---,
+# Hinweise auf der Einrückungsebene des umgebenden Blocks).
+---
+extends: default
+
+rules:
+  line-length:
+    max: 140
+    level: warning
+  truthy:
+    allowed-values: ['true', 'false', 'yes', 'no']
+  document-start: disable
+  comments-indentation: disable

@@ -1,0 +1,15 @@
+---
+# Lokales Vagrant-Dev-Inventar. Nach inventory/dev.yml kopieren.
+all:
+  hosts:
+    mirotalkbro-rtmp-dev:
+      ansible_host: 192.168.56.5
+      # Ohne Host-Härtung (Dev-Default):
+      ansible_user: root
+      ansible_port: 22
+      ansible_become: false
+      # Nach einer eigenen Host-Härtung stattdessen:
+      # ansible_user: <gehärteter-benutzer>
+      # ansible_port: <gehärteter-ssh-port>
+      # ansible_become: true
+      mirotalkbro_rtmp_dev_domain: mirotalkbro-rtmp-dev.test

@@ -1,0 +1,72 @@
+# ============================================================================
+# MiroTalk BRO — RTMP-Spezialinstanz: Dev-.env
+#
+# GERENDERT von playbooks/dev_deploy.yml (templates/dev-env.j2) — nicht von
+# Hand pflegen, der nächste Playbook-Lauf überschreibt die Datei.
+# Enthält Secrets und gehört NIEMALS in Git (siehe .gitignore).
+#
+# Variablen entsprechen .env.example: docker compose interpoliert daraus
+# ${BRO_INGEST_SECRET} und die RTC-Ports; der bro-Container liest die Datei
+# zusätzlich read-only als App-Konfiguration (/src/.env).
+# ============================================================================
+
+# --- Ingest-Secret (PFLICHT) --------------------------------------------------
+# Schützt die interne external-ingest-API zwischen rtmp-adapter und BRO;
+# identischer Wert wie EXTERNAL_INGEST_SECRET (gleiche Generierung).
+BRO_INGEST_SECRET={{ mirotalkbro_rtp_dev_bro_ingest_secret }}
+
+# --- External-Ingest-API (BRO-Patch) ------------------------------------------
+# Der bro-Container erhält beide Werte zusätzlich erzwingend per Compose-
+# Umgebung; hier gesetzt, damit auch ein lokaler Nicht-Compose-Lauf konsistent
+# bleibt.
+EXTERNAL_INGEST_ENABLED=true
+EXTERNAL_INGEST_SECRET={{ mirotalkbro_rtp_dev_bro_ingest_secret }}
+
+# --- BRO-Basisapp ---------------------------------------------------------------
+NODE_ENV=production
+PORT={{ mirotalkbro_rtp_dev_port }}
+
+# SFU-Betrieb ist für die RTMP-Instanz zwingend (Ingest nur im SFU-Modus).
+BROADCASTING=sfu
+
+# Generierte Dev-Tokens (unter .secrets/ abgelegt): ADMIN_TOKEN für das
+# Admin-only-Broadcasting der BRO-Weboberfläche, API_KEY_SECRET für die
+# REST-API (/api/v1/*).
+ADMIN_TOKEN={{ mirotalkbro_rtp_dev_admin_token }}
+API_KEY_SECRET={{ mirotalkbro_rtp_dev_api_key_secret }}
+
+# --- mediasoup (SFU) ----------------------------------------------------------
+# Anzahl Worker; leer = Anzahl CPU-Kerne.
+MEDIASOUP_NUM_WORKERS=
+# RTC-Portbereich für Medien (TCP+UDP), identisch zu den Compose-Ports.
+MEDIASOUP_RTC_MIN_PORT=40200
+MEDIASOUP_RTC_MAX_PORT=40300
+MEDIASOUP_LOG_LEVEL=error
+# Im Container auf allen Interfaces lauschen; die Dev-VM-IP announce'n.
+MEDIASOUP_LISTEN_IP=0.0.0.0
+MEDIASOUP_ANNOUNCED_IP={{ ansible_host }}
+
+# --- rtmp-adapter (Optionales Tuning; Defaults gelten ohne Eintrag) -----------
+# RECONCILE_INTERVAL_MS=2000
+# VIDEO_BITRATE=2500k
+# AUDIO_BITRATE=128k
+# KEYFRAME_SECONDS=2
+# VIDEO_PRESET=veryfast
+# LOG_LEVEL=info
+
+# --- Logging / Betrieb --------------------------------------------------------
+LOGS_JSON=false
+LOGS_JSON_PRETTY=false
+TRUST_PROXY=false
+TZ=UTC
+DEBUG=false
+CORS_ORIGIN='*'
+CORS_METHODS='["GET", "POST"]'
+
+# --- STUN/TURN (Viewer/Browser-Broadcaster) -----------------------------------
+STUN_SERVER_ENABLED=true
+STUN_SERVER_URL=stun:stun.l.google.com:19302
+TURN_SERVER_ENABLED=false
+TURN_SERVER_URL=
+TURN_SERVER_USERNAME=
+TURN_SERVER_CREDENTIAL=
